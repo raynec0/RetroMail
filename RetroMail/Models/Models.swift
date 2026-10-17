@@ -139,11 +139,16 @@ struct MessageSummary: Codable, Identifiable, Hashable {
     var from: MailAddress?
     var to: [MailAddress]
     var cc: [MailAddress]
+    /// 信头 Date（发件人声称的发送时间）
     var date: Date
+    /// 服务器收到时间（INTERNALDATE），用于排序，与 Outlook 一致
+    var received: Date
     var flags: [String]
     var size: Int
     var hasAttachment: Bool
     var messageId: String?
+    var inReplyTo: String?
+    var references: [String]
 
     var id: Int { uid }
 
@@ -159,6 +164,12 @@ struct MessageSummary: Codable, Identifiable, Hashable {
         flags.removeAll { $0.caseInsensitiveCompare(flag) == .orderedSame }
         if on { flags.append(flag) }
     }
+
+    /// 新的在前：先比收到时间，再比 UID。
+    static func newestFirst(_ a: MessageSummary, _ b: MessageSummary) -> Bool {
+        if a.received != b.received { return a.received > b.received }
+        return a.uid > b.uid
+    }
 }
 
 extension MessageSummary {
@@ -168,12 +179,110 @@ extension MessageSummary {
         self.from = MailAddress.parseList(h["From"]).first
         self.to = MailAddress.parseList(h["To"])
         self.cc = MailAddress.parseList(h["Cc"])
-        self.date = DateParsing.rfc2822(h["Date"]) ?? internalDate ?? Date()
+        let headerDate = DateParsing.rfc2822(h["Date"])
+        self.date = headerDate ?? internalDate ?? Date()
+        self.received = internalDate ?? headerDate ?? Date()
         self.flags = flags
         self.size = size
         let ct = (h["Content-Type"] ?? "").lowercased()
         self.hasAttachment = ct.contains("multipart/mixed") || ct.contains("application/")
-        self.messageId = h["Message-ID"]
+        self.messageId = Threading.ids(h["Message-ID"]).first
+        self.inReplyTo = Threading.ids(h["In-Reply-To"]).first
+        self.references = Threading.ids(h["References"])
+    }
+}
+
+// MARK: - 会话（同一主题的往来邮件）
+
+struct Conversation: Identifiable, Hashable {
+    /// 新的在前
+    var messages: [MessageSummary]
+
+    var id: String { "c" + String(messages.map(\.uid).min() ?? 0) }
+    var latest: MessageSummary { messages[0] }
+    var uids: [Int] { messages.map(\.uid) }
+    var unread: Int { messages.filter { !$0.seen }.count }
+    var flagged: Bool { messages.contains { $0.flagged } }
+    var hasAttachment: Bool { messages.contains { $0.hasAttachment } }
+    var answered: Bool { latest.answered }
+    var count: Int { messages.count }
+    var subject: String { Threading.core(latest.subject).isEmpty ? latest.subject : Threading.core(latest.subject) }
+}
+
+enum Threading {
+    private static let prefix = try! NSRegularExpression(
+        pattern: "^\\s*((re|fw|fwd|aw|wg|sv|vs|tr|r|回复|答复|回覆|转发|轉寄|转寄|轉發)\\s*(\\[\\d+\\]|\\(\\d+\\))?\\s*[:：]\\s*)+",
+        options: [.caseInsensitive])
+    private static let idRegex = try! NSRegularExpression(pattern: "<[^<>\\s]+>")
+
+    /// 去掉 Re:/回复：等前缀后的主题（保留大小写）。
+    static func core(_ subject: String) -> String {
+        let ns = subject as NSString
+        let stripped = prefix.stringByReplacingMatches(in: subject, range: NSRange(location: 0, length: ns.length), withTemplate: "")
+        return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 用于分组比较的主题键。
+    static func key(_ subject: String) -> String {
+        core(subject).lowercased().components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// 提取 <id@host> 列表（统一小写）。
+    static func ids(_ raw: String?) -> [String] {
+        guard let raw = raw, !raw.isEmpty else { return [] }
+        let ns = raw as NSString
+        let found = idRegex.matches(in: raw, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range).lowercased() }
+        if found.isEmpty {
+            let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.contains("@") && !t.contains(" ") ? ["<" + t.lowercased() + ">"] : []
+        }
+        return found
+    }
+
+    /// 两封邮件是否属于同一会话。
+    static func related(_ a: MessageSummary, _ b: MessageSummary) -> Bool {
+        if let ida = a.messageId, b.references.contains(ida) || b.inReplyTo == ida { return true }
+        if let idb = b.messageId, a.references.contains(idb) || a.inReplyTo == idb { return true }
+        let ka = key(a.subject)
+        return !ka.isEmpty && ka == key(b.subject)
+    }
+
+    /// 按 Message-ID 引用链 + 主题把邮件分组（与 Outlook 的会话视图类似）。
+    static func group(_ msgs: [MessageSummary]) -> [Conversation] {
+        let n = msgs.count
+        var parent = Array(0..<n)
+        func find(_ i: Int) -> Int {
+            var r = i
+            while parent[r] != r { r = parent[r] }
+            var c = i
+            while parent[c] != r { let next = parent[c]; parent[c] = r; c = next }
+            return r
+        }
+        func union(_ a: Int, _ b: Int) {
+            let ra = find(a), rb = find(b)
+            if ra != rb { parent[rb] = ra }
+        }
+        var byId: [String: Int] = [:]
+        for (i, m) in msgs.enumerated() {
+            if let id = m.messageId { byId[id] = i }
+        }
+        var bySubject: [String: Int] = [:]
+        for (i, m) in msgs.enumerated() {
+            for ref in m.references + (m.inReplyTo.map { [$0] } ?? []) {
+                if let j = byId[ref] { union(i, j) }
+            }
+            let k = key(m.subject)
+            if !k.isEmpty {
+                if let j = bySubject[k] { union(i, j) } else { bySubject[k] = i }
+            }
+        }
+        var groups: [Int: [MessageSummary]] = [:]
+        for (i, m) in msgs.enumerated() {
+            groups[find(i), default: []].append(m)
+        }
+        return groups.values
+            .map { Conversation(messages: $0.sorted(by: MessageSummary.newestFirst)) }
+            .sorted { MessageSummary.newestFirst($0.latest, $1.latest) }
     }
 }
 
@@ -246,12 +355,12 @@ struct MailFolder: Codable, Identifiable, Hashable {
 
     var displayName: String {
         switch role {
-        case .inbox: return "收件箱"
-        case .drafts: return "草稿箱"
-        case .sent: return "已发送"
-        case .junk: return "垃圾邮件"
-        case .trash: return "已删除"
-        case .archive: return "归档"
+        case .inbox: return tr("收件箱", "Inbox")
+        case .drafts: return tr("草稿箱", "Drafts")
+        case .sent: return tr("已发送", "Sent")
+        case .junk: return tr("垃圾邮件", "Junk")
+        case .trash: return tr("已删除", "Trash")
+        case .archive: return tr("归档", "Archive")
         case .other: return lastName
         }
     }
@@ -302,27 +411,41 @@ enum DateParsing {
 }
 
 enum Fmt {
-    private static func formatter(_ fmt: String) -> DateFormatter {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "zh_CN")
-        f.dateFormat = fmt
-        return f
-    }
+    private static var cache: [String: DateFormatter] = [:]
+    private static let lock = NSLock()
 
-    private static let time = formatter("HH:mm")
-    private static let monthDay = formatter("M/d")
-    private static let full = formatter("yy/M/d")
-    private static let longF = formatter("yyyy年M月d日 HH:mm")
+    private static func string(_ d: Date, zh: String, en: String) -> String {
+        let english = tr("zh", "en") == "en"
+        let fmt = english ? en : zh
+        lock.lock()
+        defer { lock.unlock() }
+        let key = fmt + (english ? "#en" : "#zh")
+        let f: DateFormatter
+        if let c = cache[key] {
+            f = c
+        } else {
+            f = DateFormatter()
+            f.locale = Locale(identifier: english ? "en_US" : "zh_CN")
+            f.dateFormat = fmt
+            cache[key] = f
+        }
+        return f.string(from: d)
+    }
 
     static func short(_ d: Date) -> String {
         let cal = Calendar.current
-        if cal.isDateInToday(d) { return time.string(from: d) }
-        if cal.isDateInYesterday(d) { return "昨天" }
-        if cal.isDate(d, equalTo: Date(), toGranularity: .year) { return monthDay.string(from: d) }
-        return full.string(from: d)
+        if cal.isDateInToday(d) { return string(d, zh: "HH:mm", en: "h:mm a") }
+        if cal.isDateInYesterday(d) { return tr("昨天", "Yesterday") }
+        if let days = cal.dateComponents([.day], from: cal.startOfDay(for: d), to: cal.startOfDay(for: Date())).day, days < 7 {
+            return string(d, zh: "EEE", en: "EEE")
+        }
+        if cal.isDate(d, equalTo: Date(), toGranularity: .year) { return string(d, zh: "M/d", en: "MMM d") }
+        return string(d, zh: "yy/M/d", en: "M/d/yy")
     }
 
-    static func long(_ d: Date) -> String { longF.string(from: d) }
+    static func long(_ d: Date) -> String {
+        string(d, zh: "yyyy年M月d日 EEE HH:mm", en: "EEE, MMM d, yyyy h:mm a")
+    }
 
     static func size(_ bytes: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)

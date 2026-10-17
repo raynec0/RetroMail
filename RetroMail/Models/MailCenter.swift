@@ -85,6 +85,28 @@ final class MailCenter: ObservableObject {
         unread[k] = max(0, (unread[k] ?? 0) + delta)
     }
 
+    // MARK: - 会话：跨文件夹查找相关邮件
+
+    /// 在“已发送”“收件箱”等文件夹里查找属于同一会话的邮件（Outlook 会话视图的做法）。
+    func relatedMessages(_ a: MailAccount, conversation: Conversation, currentFolder: String) async -> [(folder: String, summary: MessageSummary)] {
+        if folders[a.id] == nil { await loadFolders(a) }
+        let core = Threading.core(conversation.latest.subject)
+        guard !core.isEmpty else { return [] }
+        var targets: [String] = []
+        for role in [FolderRole.inbox, .sent] {
+            if let f = folder(a, role: role), f.path != currentFolder { targets.append(f.path) }
+        }
+        let c = client(for: a)
+        var out: [(folder: String, summary: MessageSummary)] = []
+        for path in targets {
+            guard let found = try? await c.perform({ try await $0.searchSubject(path, subject: core, limit: 30) }) else { continue }
+            for m in found where conversation.messages.contains(where: { Threading.related($0, m) }) {
+                out.append((path, m))
+            }
+        }
+        return out
+    }
+
     // MARK: - 发信 / 草稿
 
     func send(_ mail: OutgoingMail, account a: MailAccount,
@@ -111,7 +133,7 @@ final class MailCenter: ObservableObject {
     func saveDraft(_ mail: OutgoingMail, account a: MailAccount, replacing: (folder: String, uid: Int)?) async throws {
         if folders[a.id] == nil { await loadFolders(a) }
         guard let drafts = folder(a, role: .drafts) else {
-            throw MailError.protocolError("没有找到“草稿箱”文件夹。")
+            throw MailError.protocolError(tr("没有找到“草稿箱”文件夹。", "No Drafts folder was found."))
         }
         let data = await Task.detached { MIMEBuilder.build(mail, includeBcc: true) }.value
         let path = drafts.path
@@ -176,7 +198,7 @@ enum BackgroundRefresh {
             let c = UNMutableNotificationContent()
             c.title = m.from?.display ?? a.email
             if multiAccount { c.subtitle = a.email }
-            c.body = m.subject.isEmpty ? "（无主题）" : m.subject
+            c.body = m.subject.isEmpty ? tr("（无主题）", "(No subject)") : m.subject
             c.sound = .default
             c.threadIdentifier = a.id.uuidString
             let req = UNNotificationRequest(identifier: "\(a.id.uuidString)-\(m.uid)", content: c, trigger: nil)
@@ -185,7 +207,7 @@ enum BackgroundRefresh {
         if msgs.count > 5 {
             let c = UNMutableNotificationContent()
             c.title = "RetroMail"
-            c.body = "\(a.email) 还有 \(msgs.count - 5) 封新邮件"
+            c.body = tr("\(a.email) 还有 \(msgs.count - 5) 封新邮件", "\(msgs.count - 5) more new messages for \(a.email)")
             c.threadIdentifier = a.id.uuidString
             try? await center.add(UNNotificationRequest(identifier: "\(a.id.uuidString)-more", content: c, trigger: nil))
         }

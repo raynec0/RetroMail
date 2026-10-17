@@ -19,7 +19,7 @@ final class IMAPConnection: @unchecked Sendable {
     private(set) var selected: String?
     private(set) var selectedExists = 0
 
-    static let summaryItems = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID CONTENT-TYPE)])"
+    static let summaryItems = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID CONTENT-TYPE IN-REPLY-TO REFERENCES)])"
 
     init(config: ServerConfig) {
         self.config = config
@@ -32,7 +32,7 @@ final class IMAPConnection: @unchecked Sendable {
     // MARK: - 连接与登录
 
     func connect() async throws {
-        guard !config.host.isEmpty else { throw MailError.protocolError("未填写收件服务器地址") }
+        guard !config.host.isEmpty else { throw MailError.protocolError(tr("未填写收件服务器地址", "Incoming server is not set")) }
         let s = MailSocket(host: config.host, port: config.port, allowInsecure: config.allowInsecure)
         socket = s
         if config.security == .ssl { s.startTLS() }
@@ -41,13 +41,13 @@ final class IMAPConnection: @unchecked Sendable {
         let greeting = String(decoding: greetingData, as: UTF8.self)
         let upperGreeting = greeting.uppercased()
         guard upperGreeting.hasPrefix("* OK") || upperGreeting.hasPrefix("* PREAUTH") else {
-            throw MailError.protocolError("服务器问候异常：\(greeting)")
+            throw MailError.protocolError(tr("服务器问候异常：", "Unexpected server greeting: ") + greeting)
         }
         try await refreshCapabilities()
 
         if config.security == .starttls {
             guard capabilities.contains("STARTTLS") else {
-                throw MailError.protocolError("该服务器不支持 STARTTLS，请改用 SSL/TLS 或不加密。")
+                throw MailError.protocolError(tr("该服务器不支持 STARTTLS，请改用 SSL/TLS 或不加密。", "This server does not support STARTTLS. Use SSL/TLS or no encryption."))
             }
             try await run("STARTTLS")
             s.startTLS()
@@ -326,6 +326,19 @@ final class IMAPConnection: @unchecked Sendable {
         return Self.parseSummaries(f.untagged)
     }
 
+    /// 按主题查找同一会话的邮件（用于把“已发送”里的回复并入会话）。
+    func searchSubject(_ path: String, subject: String, limit: Int) async throws -> [MessageSummary] {
+        let q = String(subject.prefix(60))
+        guard !q.isEmpty else { return [] }
+        try await select(path)
+        let ascii = q.unicodeScalars.allSatisfy { $0.isASCII }
+        let r = try await run([.text("UID SEARCH " + (ascii ? "" : "CHARSET UTF-8 ") + "SUBJECT "), Self.astring(q)])
+        let uids = Array(Self.parseSearch(r.untagged).sorted().suffix(limit))
+        guard !uids.isEmpty else { return [] }
+        let f = try await run("UID FETCH \(Self.uidSet(uids)) \(Self.summaryItems)")
+        return Self.parseSummaries(f.untagged)
+    }
+
     func fetchRaw(_ path: String, uid: Int) async throws -> Data {
         try await select(path)
         let r = try await run("UID FETCH \(uid) (UID BODY.PEEK[])")
@@ -343,7 +356,7 @@ final class IMAPConnection: @unchecked Sendable {
             }
             if let body = body, u == nil || u == uid { return body }
         }
-        throw MailError.protocolError("这封邮件已不存在（可能已在其他设备上删除）。")
+        throw MailError.protocolError(tr("这封邮件已不存在（可能已在其他设备上删除）。", "This message no longer exists (it may have been deleted on another device)."))
     }
 
     static func parseSearch(_ untagged: [Data]) -> [Int] {
@@ -387,7 +400,7 @@ final class IMAPConnection: @unchecked Sendable {
             guard let u = uid, let h = header else { continue }
             out.append(MessageSummary(uid: u, headers: MIMEHeaders.parse(h), flags: flags, internalDate: internalDate, size: size))
         }
-        return out.sorted { $0.uid > $1.uid }
+        return out.sorted(by: MessageSummary.newestFirst)
     }
 
     // MARK: - 修改

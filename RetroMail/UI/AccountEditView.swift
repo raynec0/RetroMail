@@ -6,14 +6,20 @@ struct ServerPreset: Identifiable {
     let smtp: String
     var id: String { name }
 
-    static let all: [ServerPreset] = [
-        ServerPreset(name: "腾讯企业邮", imap: "imap.exmail.qq.com", smtp: "smtp.exmail.qq.com"),
-        ServerPreset(name: "阿里企业邮", imap: "imap.qiye.aliyun.com", smtp: "smtp.qiye.aliyun.com"),
-        ServerPreset(name: "网易企业邮", imap: "imap.qiye.163.com", smtp: "smtp.qiye.163.com"),
-        ServerPreset(name: "QQ 邮箱", imap: "imap.qq.com", smtp: "smtp.qq.com"),
-        ServerPreset(name: "163 邮箱", imap: "imap.163.com", smtp: "smtp.163.com"),
-        ServerPreset(name: "Gmail", imap: "imap.gmail.com", smtp: "smtp.gmail.com"),
-    ]
+    static var all: [ServerPreset] {
+        [
+            ServerPreset(name: tr("腾讯企业邮", "Tencent Exmail"), imap: "imap.exmail.qq.com", smtp: "smtp.exmail.qq.com"),
+            ServerPreset(name: tr("阿里企业邮", "Alibaba Mail"), imap: "imap.qiye.aliyun.com", smtp: "smtp.qiye.aliyun.com"),
+            ServerPreset(name: tr("网易企业邮", "NetEase Enterprise"), imap: "imap.qiye.163.com", smtp: "smtp.qiye.163.com"),
+            ServerPreset(name: tr("QQ 邮箱", "QQ Mail"), imap: "imap.qq.com", smtp: "smtp.qq.com"),
+            ServerPreset(name: tr("163 邮箱", "163 Mail"), imap: "imap.163.com", smtp: "smtp.163.com"),
+            ServerPreset(name: "Gmail", imap: "imap.gmail.com", smtp: "smtp.gmail.com"),
+        ]
+    }
+}
+
+private var securityOptions: [(MailSecurity, String)] {
+    MailSecurity.allCases.map { ($0, $0.label) }
 }
 
 struct AccountEditView: View {
@@ -37,25 +43,26 @@ struct AccountEditView: View {
     }
 
     var body: some View {
-        RetroScreen(title: existing == nil ? "新建账户" : "账户设置") {
+        RetroScreen(title: existing == nil ? tr("新建账户", "New Account") : tr("账户设置", "Account Settings")) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 8) {
                     identityGroup
                     imapGroup
                     smtpGroup
                     optionsGroup
                     actions
                 }
-                .padding(12)
+                .padding(14)
             }
             .scrollDismissesKeyboard(.interactively)
         }
-        .busyOverlay(testing, "正在测试连接…")
+        .busyOverlay(testing, tr("正在测试连接…", "Testing connection…"))
         .retroAlert($message)
-        .confirmationDialog("删除这个账户？本机上的缓存也会一并清除，服务器上的邮件不受影响。",
+        .confirmationDialog(tr("删除这个账户？本机上的缓存也会一并清除，服务器上的邮件不受影响。",
+                               "Delete this account? Local cache will be removed; mail on the server is not affected."),
                             isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("删除账户", role: .destructive) { deleteAccount() }
-            Button("取消", role: .cancel) {}
+            Button(tr("删除账户", "Delete Account"), role: .destructive) { deleteAccount() }
+            Button(tr("取消", "Cancel"), role: .cancel) {}
         }
         .onChange(of: a.email) { newValue in autofill(newValue) }
         .onChange(of: a.imapSecurity) { s in
@@ -70,86 +77,84 @@ struct AccountEditView: View {
         }
     }
 
-    // MARK: 分组
-
     private var identityGroup: some View {
-        RetroGroup("身份") {
-            RetroField(label: "显示名称", text: $a.name, placeholder: "如：张三")
-            RetroField(label: "邮箱地址", text: $a.email, placeholder: "name@company.com", keyboard: .emailAddress)
+        RetroGroup(tr("身份", "Identity")) {
+            RetroField(label: tr("显示名称", "Name"), text: $a.name, placeholder: tr("如：张三", "e.g. Jane Smith"))
+            RetroField(label: tr("邮箱地址", "Email"), text: $a.email, placeholder: "name@company.com", keyboard: .emailAddress)
             HStack(alignment: .top, spacing: 6) {
-                Text("签名").font(RT.font(13, .bold)).frame(width: 76, alignment: .trailing).padding(.top, 6)
+                Text(tr("签名", "Signature")).font(RT.font(13, .bold)).frame(width: 80, alignment: .trailing).padding(.top, 6)
                 TextEditor(text: $a.signature)
                     .font(RT.font(13))
                     .scrollContentBackground(.hidden)
-                    .frame(height: 64)
+                    .frame(height: 70)
                     .padding(2)
-                    .overlay(Rectangle().stroke(Color.black, lineWidth: 1))
+                    .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
             }
         }
     }
 
     private var imapGroup: some View {
-        RetroGroup("收件服务器（IMAP）") {
+        RetroGroup(tr("收件服务器（IMAP）", "Incoming (IMAP)")) {
             HStack {
-                Spacer().frame(width: 82)
+                Spacer().frame(width: 86)
                 Menu {
                     ForEach(ServerPreset.all) { p in
                         Button(p.name) { apply(p) }
                     }
                 } label: {
-                    Text("套用常见服务器 ▾").font(RT.font(12, .bold)).underline()
+                    Text(tr("套用常见服务器 ▾", "Use a preset ▾")).font(RT.font(12, .bold))
                 }
             }
-            RetroField(label: "服务器", text: $a.imapHost, placeholder: "imap.company.com", keyboard: .URL)
-            RetroField(label: "端口", text: intBinding(\.imapPort), keyboard: .numberPad)
-            RetroRadioRow(label: "加密", selection: $a.imapSecurity)
-            RetroField(label: "用户名", text: $a.imapUser, placeholder: "通常就是邮箱地址", keyboard: .emailAddress)
-            RetroField(label: "密码", text: $imapPass, placeholder: "密码或授权码", secure: true)
+            RetroField(label: tr("服务器", "Server"), text: $a.imapHost, placeholder: "imap.company.com", keyboard: .URL)
+            RetroField(label: tr("端口", "Port"), text: intBinding(\.imapPort), keyboard: .numberPad)
+            RetroRadio(label: tr("加密", "Security"), options: securityOptions, selection: $a.imapSecurity)
+            RetroField(label: tr("用户名", "Username"), text: $a.imapUser, placeholder: tr("通常就是邮箱地址", "Usually your email"), keyboard: .emailAddress)
+            RetroField(label: tr("密码", "Password"), text: $imapPass, placeholder: tr("密码或授权码", "Password or app password"), secure: true)
         }
     }
 
     private var smtpGroup: some View {
-        RetroGroup("发件服务器（SMTP）") {
-            RetroField(label: "服务器", text: $a.smtpHost, placeholder: "smtp.company.com", keyboard: .URL)
-            RetroField(label: "端口", text: intBinding(\.smtpPort), keyboard: .numberPad)
-            RetroRadioRow(label: "加密", selection: $a.smtpSecurity)
-            RetroCheckbox(label: "使用与收件服务器相同的用户名和密码", isOn: $a.smtpSameAuth)
+        RetroGroup(tr("发件服务器（SMTP）", "Outgoing (SMTP)")) {
+            RetroField(label: tr("服务器", "Server"), text: $a.smtpHost, placeholder: "smtp.company.com", keyboard: .URL)
+            RetroField(label: tr("端口", "Port"), text: intBinding(\.smtpPort), keyboard: .numberPad)
+            RetroRadio(label: tr("加密", "Security"), options: securityOptions, selection: $a.smtpSecurity)
+            RetroCheckbox(label: tr("使用与收件服务器相同的用户名和密码", "Use the same username and password as incoming"), isOn: $a.smtpSameAuth)
             if !a.smtpSameAuth {
-                RetroField(label: "用户名", text: $a.smtpUser, keyboard: .emailAddress)
-                RetroField(label: "密码", text: $smtpPass, secure: true)
+                RetroField(label: tr("用户名", "Username"), text: $a.smtpUser, keyboard: .emailAddress)
+                RetroField(label: tr("密码", "Password"), text: $smtpPass, secure: true)
             }
         }
     }
 
     private var optionsGroup: some View {
-        RetroGroup("选项") {
-            RetroCheckbox(label: "发送后在“已发送”中保存副本（如果服务器会自动保存，请关闭以免重复）", isOn: $a.saveToSent)
-            RetroCheckbox(label: "允许不受信任的证书（公司内网自签名证书时使用）", isOn: $a.allowInsecureTLS)
+        RetroGroup(tr("选项", "Options")) {
+            RetroCheckbox(label: tr("发送后在“已发送”中保存副本（服务器会自动保存的请关闭，以免重复）",
+                                    "Save a copy to Sent after sending (turn off if your server does this itself)"), isOn: $a.saveToSent)
+            RetroCheckbox(label: tr("允许不受信任的证书（公司内网自签名证书时使用）",
+                                    "Allow untrusted certificates (for self-signed company servers)"), isOn: $a.allowInsecureTLS)
         }
     }
 
     private var actions: some View {
-        VStack(spacing: 14) {
-            HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
                 if existing != nil {
-                    Button("删除") { confirmDelete = true }
+                    Button(tr("删除", "Delete")) { confirmDelete = true }
                         .buttonStyle(RetroButtonStyle(compact: true))
                 }
                 Spacer()
-                Button("测试连接") { test() }
+                Button(tr("测试连接", "Test")) { test() }
                     .buttonStyle(RetroButtonStyle())
-                Button("存储") { save() }
+                Button(tr("存储", "Save")) { save() }
                     .buttonStyle(RetroButtonStyle(isDefault: true))
             }
-            Text("提示：企业邮箱需由管理员开启 IMAP/SMTP；开启了“安全登录”的邮箱请使用客户端专用密码。")
+            Text(tr("提示：企业邮箱需由管理员开启 IMAP/SMTP；开启了安全登录的邮箱请使用客户端专用密码。",
+                    "Tip: company mailboxes may need IMAP/SMTP enabled by an admin; accounts with 2-step sign-in need an app password."))
                 .font(RT.font(11))
-                .foregroundColor(.black)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.top, 12)
+        .padding(.top, 14)
     }
-
-    // MARK: 逻辑
 
     private func intBinding(_ kp: WritableKeyPath<MailAccount, Int>) -> Binding<String> {
         Binding(
@@ -190,11 +195,11 @@ struct AccountEditView: View {
     }
 
     private func validate() -> String? {
-        if !a.email.contains("@") { return "请填写正确的邮箱地址。" }
-        if a.imapHost.trimmingCharacters(in: .whitespaces).isEmpty { return "请填写收件服务器地址。" }
-        if a.smtpHost.trimmingCharacters(in: .whitespaces).isEmpty { return "请填写发件服务器地址。" }
-        if a.imapPort <= 0 || a.smtpPort <= 0 { return "端口号不正确。" }
-        if imapPass.isEmpty { return "请填写密码。" }
+        if !a.email.contains("@") { return tr("请填写正确的邮箱地址。", "Enter a valid email address.") }
+        if a.imapHost.trimmingCharacters(in: .whitespaces).isEmpty { return tr("请填写收件服务器地址。", "Enter the incoming server.") }
+        if a.smtpHost.trimmingCharacters(in: .whitespaces).isEmpty { return tr("请填写发件服务器地址。", "Enter the outgoing server.") }
+        if a.imapPort <= 0 || a.smtpPort <= 0 { return tr("端口号不正确。", "Invalid port.") }
+        if imapPass.isEmpty { return tr("请填写密码。", "Enter the password.") }
         return nil
     }
 
@@ -213,17 +218,17 @@ struct AccountEditView: View {
             do {
                 try await conn.connect()
                 let folders = try await conn.listFolders()
-                lines.append("✓ 收件服务器正常（\(folders.count) 个文件夹）")
+                lines.append(tr("✓ 收件服务器正常（\(folders.count) 个文件夹）", "✓ Incoming OK (\(folders.count) folders)"))
                 await conn.logout()
             } catch {
                 conn.close()
-                lines.append("✗ 收件服务器：\(error.localizedDescription)")
+                lines.append(tr("✗ 收件服务器：", "✗ Incoming: ") + error.localizedDescription)
             }
             do {
                 try await SMTPClient(config: acc.smtpConfig(imapPassword: ip, smtpPassword: sp)).verify()
-                lines.append("✓ 发件服务器正常")
+                lines.append(tr("✓ 发件服务器正常", "✓ Outgoing OK"))
             } catch {
-                lines.append("✗ 发件服务器：\(error.localizedDescription)")
+                lines.append(tr("✗ 发件服务器：", "✗ Outgoing: ") + error.localizedDescription)
             }
             testing = false
             message = lines.joined(separator: "\n\n")
@@ -254,15 +259,31 @@ struct AccountEditView: View {
 
 struct SettingsView: View {
     @ObservedObject private var store = AccountStore.shared
+    @EnvironmentObject private var settings: AppSettings
     @AppStorage(BackgroundRefresh.enabledKey) private var notify = false
     @State private var message: String?
     @State private var cacheSize = DiskCache.sizeDescription
+    @State private var showAI = false
+    @State private var aiConfigured = AIConfig.isConfigured
 
     var body: some View {
-        RetroScreen(title: "控制面板") {
+        RetroScreen(title: tr("控制面板", "Control Panel")) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
-                    RetroGroup("账户") {
+                VStack(alignment: .leading, spacing: 8) {
+                    RetroGroup(tr("外观与语言", "Appearance & Language")) {
+                        RetroRadio(label: tr("外观", "Theme"), options: Appearance.allCases.map { ($0, $0.label) },
+                                   selection: $settings.appearance, labelWidth: 56)
+                        RetroRadio(label: tr("语言", "Language"), options: AppLanguage.allCases.map { ($0, $0.label) },
+                                   selection: $settings.language, labelWidth: 56)
+                    }
+
+                    RetroGroup(tr("阅读", "Reading")) {
+                        RetroCheckbox(label: tr("按会话分组（同一主题的往来邮件合并显示，包括“已发送”中的回复）",
+                                                "Group by conversation (includes your replies from Sent)"), isOn: $settings.threaded)
+                        RetroCheckbox(label: tr("默认折叠引用的历史内容", "Collapse quoted history by default"), isOn: $settings.hideQuotes)
+                    }
+
+                    RetroGroup(tr("账户", "Accounts")) {
                         ForEach(store.accounts) { a in
                             NavigationLink(value: Route.account(a)) {
                                 HStack {
@@ -274,30 +295,42 @@ struct SettingsView: View {
                                     Spacer()
                                     Image(systemName: "chevron.right").font(.system(size: 12, weight: .bold))
                                 }
-                                .padding(8)
-                                .overlay(Rectangle().stroke(Color.black, lineWidth: 1))
+                                .padding(9)
                                 .contentShape(Rectangle())
                             }
-                            .buttonStyle(InvertOnPressStyle())
+                            .buttonStyle(TileStyle())
                         }
                         NavigationLink(value: Route.account(nil)) {
-                            Text("添加账户…")
+                            Label(tr("添加账户…", "Add Account…"), systemImage: "plus")
                         }
                         .buttonStyle(RetroButtonStyle(compact: true))
                     }
 
-                    RetroGroup("新邮件通知") {
-                        RetroCheckbox(label: "在后台检查收件箱，有新邮件时通知我", isOn: $notify)
-                        Text("检查频率由 iOS 决定（通常每 15 分钟到数小时一次），取决于你使用本应用的频率和电量。")
+                    RetroGroup(tr("AI 助手", "AI Assistant")) {
+                        HStack {
+                            Text(aiConfigured ? tr("✓ 已设置：", "✓ Configured: ") + AIConfig.load().model : tr("未设置", "Not set up"))
+                                .font(RT.font(13))
+                                .lineLimit(1)
+                            Spacer()
+                            Button(tr("设置…", "Set Up…")) { showAI = true }
+                                .buttonStyle(RetroButtonStyle(compact: true))
+                        }
+                        Text(tr("用于写信时撰写、润色、翻译，以及总结会话。", "Used to write, polish and translate mail, and to recap threads."))
+                            .font(RT.font(11))
+                    }
+
+                    RetroGroup(tr("新邮件通知", "New Mail Alerts")) {
+                        RetroCheckbox(label: tr("在后台检查收件箱，有新邮件时通知我", "Check the inbox in the background and notify me"), isOn: $notify)
+                        Text(tr("检查频率由 iOS 决定（通常 15 分钟到数小时一次）。", "iOS decides how often (usually every 15 min to a few hours)."))
                             .font(RT.font(11))
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    RetroGroup("存储") {
+                    RetroGroup(tr("存储", "Storage")) {
                         HStack {
-                            Text("离线缓存：\(cacheSize)").font(RT.font(13))
+                            Text(tr("离线缓存：", "Offline cache: ") + cacheSize).font(RT.font(13))
                             Spacer()
-                            Button("清除") {
+                            Button(tr("清除", "Clear")) {
                                 DiskCache.clear()
                                 cacheSize = DiskCache.sizeDescription
                             }
@@ -305,17 +338,22 @@ struct SettingsView: View {
                         }
                     }
 
-                    RetroGroup("关于") {
-                        Text("RetroMail 1.0\n标准 IMAP4rev1 / SMTP 客户端，密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输。")
+                    RetroGroup(tr("关于", "About")) {
+                        Text(tr("RetroMail 2.0\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
+                                "RetroMail 2.0\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
                             .font(RT.font(12))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .padding(12)
-                .foregroundColor(.black)
+                .padding(14)
+                .foregroundColor(.ink)
             }
         }
         .retroAlert($message)
+        .sheet(isPresented: $showAI, onDismiss: { aiConfigured = AIConfig.isConfigured }) {
+            AISettingsSheet()
+                .preferredColorScheme(settings.colorScheme)
+        }
         .onChange(of: notify) { on in
             guard on else { return }
             Task {
@@ -324,7 +362,7 @@ struct SettingsView: View {
                     BackgroundRefresh.schedule()
                 } else {
                     notify = false
-                    message = "没有通知权限。请到“设置 > 通知 > RetroMail”中允许通知。"
+                    message = tr("没有通知权限。请到“设置 > 通知 > RetroMail”中允许通知。", "Notifications are off. Allow them in Settings > Notifications > RetroMail.")
                 }
             }
         }

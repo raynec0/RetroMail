@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// 经典 Mac OS（System 6/7）风格的黑白组件。
+/// 经典 Mac OS × 古早 iOS：黑白线框、方块按钮、硬阴影、轻微光泽渐变。
 enum RT {
     static func font(_ size: CGFloat = 15, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .monospaced)
@@ -11,21 +11,26 @@ enum RT {
 // MARK: - 背景与线条
 
 struct DitherBackground: View {
-    static let pattern: UIImage = {
+    @Environment(\.colorScheme) private var scheme
+
+    private static func pattern(dark: Bool) -> UIImage {
         let fmt = UIGraphicsImageRendererFormat()
         fmt.scale = UIScreen.main.scale
         return UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2), format: fmt).image { ctx in
-            UIColor.white.setFill()
+            (dark ? UIColor(white: 0.04, alpha: 1) : UIColor.white).setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
-            UIColor.black.setFill()
+            (dark ? UIColor(white: 0.30, alpha: 1) : UIColor.black).setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
             ctx.fill(CGRect(x: 1, y: 1, width: 1, height: 1))
         }
-    }()
+    }
+
+    private static let light = pattern(dark: false)
+    private static let dark = pattern(dark: true)
 
     var body: some View {
         Rectangle()
-            .fill(ImagePaint(image: Image(uiImage: Self.pattern), scale: 1))
+            .fill(ImagePaint(image: Image(uiImage: scheme == .dark ? Self.dark : Self.light), scale: 1))
             .ignoresSafeArea()
     }
 }
@@ -41,12 +46,20 @@ struct HLine: Shape {
 
 struct RetroDivider: View {
     var dotted = false
+
     var body: some View {
         if dotted {
-            HLine().stroke(Color.black, style: StrokeStyle(lineWidth: 1, dash: [1, 2])).frame(height: 1)
+            HLine().stroke(Color.ink, style: StrokeStyle(lineWidth: 1, dash: [1, 2])).frame(height: 1)
         } else {
-            Rectangle().fill(Color.black).frame(height: 1)
+            Rectangle().fill(Color.ink).frame(height: 1)
         }
+    }
+}
+
+/// 古早 iOS 的光泽底：上亮下暗。
+struct GlossFill: View {
+    var body: some View {
+        LinearGradient(colors: [.paper, .mist, .shade.opacity(0.55)], startPoint: .top, endPoint: .bottom)
     }
 }
 
@@ -60,7 +73,7 @@ struct StripedTitleBar: View {
         ZStack {
             VStack(spacing: 1) {
                 ForEach(0..<6, id: \.self) { _ in
-                    Rectangle().fill(Color.black).frame(height: 1)
+                    Rectangle().fill(Color.ink).frame(height: 1)
                 }
             }
             .padding(.horizontal, 3)
@@ -69,31 +82,31 @@ struct StripedTitleBar: View {
                 if let onClose = onClose {
                     Button(action: onClose) {
                         Rectangle()
-                            .fill(Color.white)
-                            .frame(width: 13, height: 13)
-                            .overlay(Rectangle().stroke(Color.black, lineWidth: 1))
+                            .fill(Color.paper)
+                            .frame(width: 14, height: 14)
+                            .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
                             .padding(.horizontal, 3)
-                            .background(Color.white)
-                            .frame(width: 44, height: 24)
+                            .background(Color.paper)
+                            .frame(width: 46, height: 26)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("关闭")
+                    .accessibilityLabel(tr("关闭", "Close"))
                 }
                 Spacer()
             }
 
             Text(title)
                 .font(RT.font(14, .bold))
-                .foregroundColor(.black)
+                .foregroundColor(.ink)
                 .lineLimit(1)
                 .padding(.horizontal, 8)
-                .background(Color.white)
-                .padding(.horizontal, 48)
+                .background(Color.paper)
+                .padding(.horizontal, 50)
         }
-        .frame(height: 24)
-        .background(Color.white)
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.black).frame(height: 1) }
+        .frame(height: 26)
+        .background(Color.paper)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.ink).frame(height: 1) }
     }
 }
 
@@ -101,12 +114,15 @@ struct RetroWindow<Content: View>: View {
     let title: String
     var onClose: (() -> Void)?
     var fill: Bool
+    var shadow: Bool
     let content: Content
 
-    init(title: String, onClose: (() -> Void)? = nil, fill: Bool = true, @ViewBuilder content: () -> Content) {
+    init(title: String, onClose: (() -> Void)? = nil, fill: Bool = true, shadow: Bool = true,
+         @ViewBuilder content: () -> Content) {
         self.title = title
         self.onClose = onClose
         self.fill = fill
+        self.shadow = shadow
         self.content = content()
     }
 
@@ -116,19 +132,19 @@ struct RetroWindow<Content: View>: View {
             if fill {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .background(Color.white)
+                    .background(Color.paper)
             } else {
                 content
                     .frame(maxWidth: .infinity, alignment: .top)
-                    .background(Color.white)
+                    .background(Color.paper)
             }
         }
-        .overlay(Rectangle().stroke(Color.black, lineWidth: 1))
-        .background(Rectangle().fill(Color.black).offset(x: 2, y: 2))
+        .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
+        .background(Rectangle().fill(Color.ink).offset(x: shadow ? 3 : 0, y: shadow ? 3 : 0))
     }
 }
 
-/// 推入导航栈的整屏窗口：关闭框 = 返回。
+/// 全屏窗口：关闭框 = 返回。
 struct RetroScreen<Content: View>: View {
     let title: String
     var showClose: Bool
@@ -142,20 +158,18 @@ struct RetroScreen<Content: View>: View {
     }
 
     var body: some View {
-        ZStack {
-            DitherBackground()
-            RetroWindow(title: title, onClose: showClose ? { dismiss() } : nil) {
-                content
-            }
-            .padding(.horizontal, 6)
-            .padding(.top, 4)
-            .padding(.bottom, 8)
+        VStack(spacing: 0) {
+            StripedTitleBar(title: title, onClose: showClose ? { dismiss() } : nil)
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+        .foregroundColor(.ink)
+        .background(Color.paper.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
     }
 }
 
-// MARK: - 按钮
+// MARK: - 按钮：长方形（文字）
 
 struct RetroButtonStyle: ButtonStyle {
     var isDefault = false
@@ -174,74 +188,122 @@ private struct RetroButtonBody: View {
 
     var body: some View {
         let pressed = configuration.isPressed
+        let depth: CGFloat = compact ? 2 : 3
         configuration.label
             .font(RT.font(compact ? 13 : 15, .bold))
             .lineLimit(1)
-            .padding(.horizontal, compact ? 9 : 14)
-            .padding(.vertical, compact ? 5 : 7)
-            .foregroundColor(pressed ? .white : .black)
-            .background(RoundedRectangle(cornerRadius: 7).fill(pressed ? Color.black : Color.white))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.black, lineWidth: 1.5))
-            .padding(isDefault ? 3 : 0)
-            .overlay {
-                if isDefault {
-                    RoundedRectangle(cornerRadius: 10).stroke(Color.black, lineWidth: 3)
+            .padding(.horizontal, compact ? 10 : 16)
+            .padding(.vertical, compact ? 6 : 8)
+            .foregroundColor(pressed ? .paper : .ink)
+            .background {
+                if pressed { Color.ink } else { GlossFill() }
+            }
+            .overlay(alignment: .top) {
+                if !pressed {
+                    Rectangle().fill(Color.paper.opacity(0.9)).frame(height: 1).padding(.horizontal, 2).padding(.top, 2)
                 }
             }
+            .overlay(Rectangle().stroke(Color.ink, lineWidth: isDefault ? 3 : 1.5))
+            .background(Rectangle().fill(Color.ink).offset(x: pressed ? 0 : depth, y: pressed ? 0 : depth))
+            .offset(x: pressed ? depth : 0, y: pressed ? depth : 0)
             .opacity(enabled ? 1 : 0.35)
             .contentShape(Rectangle())
     }
 }
 
-/// 列表行：按下时黑白反转。
+// MARK: - 按钮：方块 + 文字（古早 iOS 工具栏风格）
+
+struct TileStyle: ButtonStyle {
+    var active = false
+    var depth: CGFloat = 2.5
+
+    func makeBody(configuration: Configuration) -> some View {
+        TileBody(configuration: configuration, active: active, depth: depth)
+    }
+}
+
+private struct TileBody: View {
+    let configuration: ButtonStyleConfiguration
+    let active: Bool
+    let depth: CGFloat
+    @Environment(\.isEnabled) private var enabled
+
+    var body: some View {
+        let pressed = configuration.isPressed
+        let on = pressed || active
+        configuration.label
+            .foregroundColor(on ? .paper : .ink)
+            .background {
+                if on { Color.ink } else { GlossFill() }
+            }
+            .overlay(alignment: .top) {
+                if !on {
+                    Rectangle().fill(Color.paper.opacity(0.9)).frame(height: 1).padding(.horizontal, 2).padding(.top, 2)
+                }
+            }
+            .overlay(Rectangle().stroke(Color.ink, lineWidth: 1.5))
+            .background(Rectangle().fill(Color.ink).offset(x: pressed ? 0 : depth, y: pressed ? 0 : depth))
+            .offset(x: pressed ? depth : 0, y: pressed ? depth : 0)
+            .opacity(enabled ? 1 : 0.3)
+            .contentShape(Rectangle())
+    }
+}
+
+struct TileButton: View {
+    var symbol: String?
+    var glyph: String?
+    var glyphFont: Font?
+    let label: String
+    var active = false
+    var size: CGFloat = 50
+    let action: () -> Void
+
+    init(symbol: String, label: String, active: Bool = false, size: CGFloat = 50, action: @escaping () -> Void) {
+        self.symbol = symbol
+        self.label = label
+        self.active = active
+        self.size = size
+        self.action = action
+    }
+
+    init(glyph: String, font: Font? = nil, label: String, active: Bool = false, size: CGFloat = 50, action: @escaping () -> Void) {
+        self.glyph = glyph
+        self.glyphFont = font
+        self.label = label
+        self.active = active
+        self.size = size
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 2) {
+                Group {
+                    if let s = symbol {
+                        Image(systemName: s).font(.system(size: size * 0.36, weight: .semibold))
+                    } else {
+                        Text(glyph ?? "").font(glyphFont ?? .system(size: size * 0.38, weight: .bold, design: .serif))
+                    }
+                }
+                .frame(height: size * 0.48)
+                Text(label)
+                    .font(RT.font(size > 54 ? 11 : 9.5, .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .padding(.horizontal, 2)
+            }
+            .frame(width: size, height: size)
+        }
+        .buttonStyle(TileStyle(active: active))
+    }
+}
+
+/// 列表行：按下时反色。
 struct InvertOnPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundColor(configuration.isPressed ? .white : .black)
-            .background(configuration.isPressed ? Color.black : Color.white)
-    }
-}
-
-struct ToolIcon: View {
-    let symbol: String
-    let label: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 3) {
-                Image(systemName: symbol).font(.system(size: 17, weight: .semibold))
-                Text(label).font(RT.font(10))
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(InvertOnPressStyle())
-    }
-}
-
-struct DesktopIcon: View {
-    let symbol: String
-    let label: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Image(systemName: symbol)
-                    .font(.system(size: 24, weight: .regular))
-                    .frame(width: 48, height: 44)
-                    .background(Color.white)
-                    .overlay(Rectangle().stroke(Color.black, lineWidth: 1))
-                Text(label)
-                    .font(RT.font(11, .bold))
-                    .padding(.horizontal, 3)
-                    .background(Color.white)
-            }
-            .foregroundColor(.black)
-        }
-        .buttonStyle(.plain)
+            .foregroundColor(configuration.isPressed ? .paper : .ink)
+            .background(configuration.isPressed ? Color.ink : Color.paper)
     }
 }
 
@@ -253,13 +315,15 @@ struct RetroField: View {
     var placeholder = ""
     var secure = false
     var keyboard: UIKeyboardType = .default
-    var labelWidth: CGFloat = 76
+    var labelWidth: CGFloat = 80
 
     var body: some View {
         HStack(spacing: 6) {
             if !label.isEmpty {
                 Text(label)
                     .font(RT.font(13, .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
                     .frame(width: labelWidth, alignment: .trailing)
             }
             Group {
@@ -275,10 +339,11 @@ struct RetroField: View {
             .keyboardType(keyboard)
             .padding(.horizontal, 6)
             .padding(.vertical, 6)
-            .background(Color.white)
-            .overlay(Rectangle().stroke(Color.black, lineWidth: 1))
+            .background(Color.paper)
+            .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
+            .background(Rectangle().fill(Color.ink).offset(x: 1.5, y: 1.5))
         }
-        .foregroundColor(.black)
+        .foregroundColor(.ink)
     }
 }
 
@@ -292,8 +357,8 @@ struct RetroCheckbox: View {
         } label: {
             HStack(alignment: .top, spacing: 8) {
                 ZStack {
-                    Rectangle().fill(Color.white)
-                    Rectangle().stroke(Color.black, lineWidth: 1)
+                    Rectangle().fill(Color.paper)
+                    Rectangle().stroke(Color.ink, lineWidth: 1)
                     if isOn {
                         Path { p in
                             p.move(to: CGPoint(x: 2, y: 2))
@@ -301,7 +366,7 @@ struct RetroCheckbox: View {
                             p.move(to: CGPoint(x: 12, y: 2))
                             p.addLine(to: CGPoint(x: 2, y: 12))
                         }
-                        .stroke(Color.black, lineWidth: 1.5)
+                        .stroke(Color.ink, lineWidth: 1.5)
                     }
                 }
                 .frame(width: 14, height: 14)
@@ -312,45 +377,89 @@ struct RetroCheckbox: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
             }
-            .foregroundColor(.black)
+            .foregroundColor(.ink)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 }
 
-struct RetroRadioRow: View {
+/// 通用单选组。
+struct RetroRadio<T: Hashable>: View {
     let label: String
-    @Binding var selection: MailSecurity
-    var labelWidth: CGFloat = 76
+    let options: [(T, String)]
+    @Binding var selection: T
+    var labelWidth: CGFloat = 80
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text(label)
-                .font(RT.font(13, .bold))
-                .frame(width: labelWidth, alignment: .trailing)
-            ForEach(MailSecurity.allCases) { s in
-                Button {
-                    selection = s
-                } label: {
-                    HStack(spacing: 3) {
-                        ZStack {
-                            Circle().fill(Color.white)
-                            Circle().stroke(Color.black, lineWidth: 1)
-                            if selection == s {
-                                Circle().fill(Color.black).padding(3)
+        HStack(alignment: .top, spacing: 6) {
+            if !label.isEmpty {
+                Text(label)
+                    .font(RT.font(13, .bold))
+                    .frame(width: labelWidth, alignment: .trailing)
+            }
+            FlowRow(spacing: 10) {
+                ForEach(options.indices, id: \.self) { i in
+                    let opt = options[i]
+                    Button {
+                        selection = opt.0
+                    } label: {
+                        HStack(spacing: 4) {
+                            ZStack {
+                                Circle().fill(Color.paper)
+                                Circle().stroke(Color.ink, lineWidth: 1)
+                                if selection == opt.0 {
+                                    Circle().fill(Color.ink).padding(3)
+                                }
                             }
+                            .frame(width: 14, height: 14)
+                            Text(opt.1).font(RT.font(12))
                         }
-                        .frame(width: 13, height: 13)
-                        Text(s.label).font(RT.font(11))
+                        .contentShape(Rectangle())
                     }
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
             Spacer(minLength: 0)
         }
-        .foregroundColor(.black)
+        .foregroundColor(.ink)
+    }
+}
+
+/// 自动换行的横向排布。
+struct FlowRow: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxW = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, lineH: CGFloat = 0, widest: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > 0 && x + s.width > maxW {
+                y += lineH + spacing
+                x = 0
+                lineH = 0
+            }
+            x += s.width + spacing
+            lineH = max(lineH, s.height)
+            widest = max(widest, x - spacing)
+        }
+        return CGSize(width: min(widest, maxW), height: y + lineH)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, lineH: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > bounds.minX && x + s.width > bounds.maxX {
+                y += lineH + spacing
+                x = bounds.minX
+                lineH = 0
+            }
+            v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
+            x += s.width + spacing
+            lineH = max(lineH, s.height)
+        }
     }
 }
 
@@ -371,23 +480,25 @@ struct RetroGroup<Content: View>: View {
         .padding(.top, 18)
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(Rectangle().stroke(Color.black, lineWidth: 1))
+        .background(Color.paper)
+        .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
+        .background(Rectangle().fill(Color.ink).offset(x: 2, y: 2))
         .overlay(alignment: .topLeading) {
             Text(title)
                 .font(RT.font(13, .bold))
                 .padding(.horizontal, 4)
-                .background(Color.white)
+                .background(Color.paper)
                 .offset(x: 10, y: -9)
         }
-        .padding(.top, 8)
-        .foregroundColor(.black)
+        .padding(.top, 10)
+        .foregroundColor(.ink)
     }
 }
 
 // MARK: - 等待与提示
 
 struct RetroBusy: View {
-    var text = "请稍候…"
+    var text = ""
     @State private var angle = 0.0
 
     var body: some View {
@@ -400,13 +511,13 @@ struct RetroBusy: View {
                         angle = 360
                     }
                 }
-            Text(text).font(RT.font(13))
+            Text(text.isEmpty ? tr("请稍候…", "Please wait…") : text).font(RT.font(13))
         }
-        .foregroundColor(.black)
+        .foregroundColor(.ink)
     }
 }
 
-/// 经典的双线框对话框。
+/// 经典双线框对话框。
 struct RetroDialog<Content: View>: View {
     let content: Content
 
@@ -416,14 +527,14 @@ struct RetroDialog<Content: View>: View {
 
     var body: some View {
         ZStack {
-            Color.white.opacity(0.01).ignoresSafeArea()
+            Color.paper.opacity(0.35).ignoresSafeArea()
             content
                 .padding(18)
-                .frame(maxWidth: 340)
-                .background(Color.white)
-                .overlay(Rectangle().stroke(Color.black, lineWidth: 1).padding(4))
-                .overlay(Rectangle().stroke(Color.black, lineWidth: 2))
-                .background(Rectangle().fill(Color.black).offset(x: 3, y: 3))
+                .frame(maxWidth: 360)
+                .background(Color.paper)
+                .overlay(Rectangle().stroke(Color.ink, lineWidth: 1).padding(4))
+                .overlay(Rectangle().stroke(Color.ink, lineWidth: 2))
+                .background(Rectangle().fill(Color.ink).offset(x: 4, y: 4))
                 .padding(24)
         }
     }
@@ -440,19 +551,22 @@ private struct RetroAlertModifier: ViewModifier {
                         HStack(alignment: .top, spacing: 12) {
                             Image(systemName: "exclamationmark.triangle")
                                 .font(.system(size: 30, weight: .bold))
-                            Text(m)
-                                .font(RT.font(13))
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
-                            Spacer(minLength: 0)
+                            ScrollView {
+                                Text(m)
+                                    .font(RT.font(13))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
+                            .frame(maxHeight: 320)
                         }
                         HStack {
                             Spacer()
-                            Button("好") { message = nil }
+                            Button(tr("好", "OK")) { message = nil }
                                 .buttonStyle(RetroButtonStyle(isDefault: true))
                         }
                     }
-                    .foregroundColor(.black)
+                    .foregroundColor(.ink)
                 }
             }
         }
@@ -470,6 +584,35 @@ extension View {
                 RetroDialog { RetroBusy(text: text) }
             }
         }
+    }
+
+    /// 底部弹出的复古面板（半屏）。
+    func retroSheetStyle() -> some View {
+        self
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+    }
+}
+
+/// 弹出面板的外框。
+struct RetroPanel<Content: View>: View {
+    let title: String
+    let content: Content
+    @Environment(\.dismiss) private var dismiss
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            StripedTitleBar(title: title, onClose: { dismiss() })
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .foregroundColor(.ink)
+        .background(Color.paper.ignoresSafeArea())
     }
 }
 
@@ -493,10 +636,10 @@ struct RetroMenuBar<Menus: View>: View {
             }
         }
         .font(RT.font(14, .bold))
-        .foregroundColor(.black)
+        .foregroundColor(.ink)
         .padding(.horizontal, 12)
         .frame(height: 30)
-        .background(Color.white)
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.black).frame(height: 1) }
+        .background(Color.paper)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.ink).frame(height: 1) }
     }
 }

@@ -8,267 +8,42 @@ struct PreviewItem: Identifiable {
     let url: URL
 }
 
-struct MessageDetailView: View {
-    @ObservedObject var list: MessageListModel
-    let summary: MessageSummary
+/// 链接处理：外部链接用 Safari 打开，mailto 打开写信，其余导航一律拦截。
+class LinkPolicyCoordinator: NSObject, WKNavigationDelegate {
+    var onMailto: ((String) -> Void)?
 
-    @State private var parsed: ParsedMessage?
-    @State private var loading = true
-    @State private var error: String?
-    @State private var loadRemote = false
-    @State private var expandedHeader = false
-    @State private var compose: ComposeRequest?
-    @State private var preview: PreviewItem?
-    @State private var showMove = false
-    @Environment(\.dismiss) private var dismiss
-
-    private var current: MessageSummary {
-        list.visible.first { $0.uid == summary.uid } ?? summary
-    }
-
-    private var isDraft: Bool { list.folder.role == .drafts }
-
-    var body: some View {
-        RetroScreen(title: summary.subject.isEmpty ? "（无主题）" : summary.subject) {
-            VStack(spacing: 0) {
-                header
-                RetroDivider()
-                bodyArea
-                RetroDivider()
-                toolbar
-            }
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url else {
+            decisionHandler(.cancel)
+            return
         }
-        .retroAlert($error)
-        .task { await load() }
-        .fullScreenCover(item: $compose) { ComposeView(request: $0) }
-        .sheet(item: $preview) { item in
-            QuickLookView(url: item.url).ignoresSafeArea()
+        let scheme = url.scheme?.lowercased() ?? ""
+        if scheme == "about" || scheme == "data" {
+            decisionHandler(.allow)
+            return
         }
-        .sheet(isPresented: $showMove) {
-            FolderPickerView(account: list.account, excluding: list.folder.path) { dest in
-                let uid = summary.uid
-                Task {
-                    await list.move([uid], to: dest)
-                    dismiss()
-                }
-            }
+        if scheme == "mailto" {
+            var addr = String(url.absoluteString.dropFirst("mailto:".count))
+            if let q = addr.firstIndex(of: "?") { addr = String(addr[..<q]) }
+            onMailto?(addr.removingPercentEncoding ?? addr)
+            decisionHandler(.cancel)
+            return
         }
-    }
-
-    // MARK: 头部
-
-    private var header: some View {
-        let from = parsed?.from ?? (summary.from.map { [$0] } ?? [])
-        let to = parsed?.to ?? summary.to
-        let cc = parsed?.cc ?? summary.cc
-        return VStack(alignment: .leading, spacing: 5) {
-            Text(summary.subject.isEmpty ? "（无主题）" : summary.subject)
-                .font(RT.font(16, .bold))
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-            headerLine("发件人", from.map(\.full).joined(separator: ", "))
-            headerLine("收件人", to.map { expandedHeader ? $0.full : $0.display }.joined(separator: ", "))
-            if !cc.isEmpty {
-                headerLine("抄　送", cc.map { expandedHeader ? $0.full : $0.display }.joined(separator: ", "))
-            }
-            headerLine("日　期", Fmt.long(parsed?.date ?? summary.date))
+        if navigationAction.navigationType == .linkActivated {
+            UIApplication.shared.open(url)
         }
-        .foregroundColor(.black)
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .onTapGesture { expandedHeader.toggle() }
-    }
-
-    private func headerLine(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Text(label + "：").font(RT.font(12, .bold))
-            Text(value.isEmpty ? "—" : value)
-                .font(RT.font(12))
-                .lineLimit(expandedHeader ? nil : 2)
-                .textSelection(.enabled)
-        }
-    }
-
-    // MARK: 正文
-
-    @ViewBuilder
-    private var bodyArea: some View {
-        if let p = parsed {
-            VStack(spacing: 0) {
-                if p.hasRemoteContent && !loadRemote {
-                    HStack(spacing: 8) {
-                        Image(systemName: "photo")
-                        Text("已阻止远程图片").font(RT.font(12))
-                        Spacer()
-                        Button("显示") { loadRemote = true }
-                            .buttonStyle(RetroButtonStyle(compact: true))
-                    }
-                    .foregroundColor(.black)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    RetroDivider(dotted: true)
-                }
-                HTMLView(html: p.renderHTML(allowRemote: loadRemote)) { mailto in
-                    compose = ComposeRequest(account: list.account, to: mailto)
-                }
-                if !p.attachments.isEmpty {
-                    attachmentList(p.attachments)
-                }
-            }
-        } else if loading {
-            VStack {
-                Spacer()
-                RetroBusy(text: "正在接收邮件…")
-                Spacer()
-            }
-            .frame(maxWidth: .infinity)
-        } else {
-            VStack(spacing: 10) {
-                Spacer()
-                Text("无法载入这封邮件").font(RT.font(13))
-                Button("重试") { Task { await load() } }
-                    .buttonStyle(RetroButtonStyle(compact: true))
-                Spacer()
-            }
-            .foregroundColor(.black)
-            .frame(maxWidth: .infinity)
-        }
-    }
-
-    private func attachmentList(_ items: [MailAttachment]) -> some View {
-        VStack(spacing: 0) {
-            RetroDivider()
-            HStack {
-                Text("附件 (\(items.count))").font(RT.font(11, .bold))
-                Spacer()
-            }
-            .foregroundColor(.black)
-            .padding(.horizontal, 10)
-            .padding(.top, 5)
-            ScrollView {
-                VStack(spacing: 0) {
-                    ForEach(items) { att in
-                        Button {
-                            open(att)
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: icon(for: att.mimeType))
-                                    .frame(width: 18)
-                                Text(att.filename).lineLimit(1)
-                                Spacer()
-                                Text(Fmt.size(att.data.count))
-                            }
-                            .font(RT.font(13))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(InvertOnPressStyle())
-                    }
-                }
-            }
-            .frame(maxHeight: min(CGFloat(items.count) * 36, 130))
-        }
-    }
-
-    private func icon(for mime: String) -> String {
-        if mime.hasPrefix("image/") { return "photo" }
-        if mime.contains("pdf") { return "doc.richtext" }
-        if mime.contains("zip") || mime.contains("compressed") || mime.contains("rar") { return "doc.zipper" }
-        if mime.hasPrefix("text/") { return "doc.plaintext" }
-        return "doc"
-    }
-
-    // MARK: 工具栏
-
-    private var toolbar: some View {
-        HStack(spacing: 0) {
-            if isDraft {
-                ToolIcon(symbol: "square.and.pencil", label: "编辑") { startCompose(.draft) }
-            } else {
-                ToolIcon(symbol: "arrowshape.turn.up.left", label: "回复") { startCompose(.reply) }
-                ToolIcon(symbol: "arrowshape.turn.up.left.2", label: "全部") { startCompose(.replyAll) }
-                ToolIcon(symbol: "arrowshape.turn.up.right", label: "转发") { startCompose(.forward) }
-            }
-            ToolIcon(symbol: current.seen ? "envelope.badge" : "envelope.open",
-                     label: current.seen ? "未读" : "已读") {
-                let target = !current.seen
-                Task { await list.setSeen([summary.uid], target) }
-            }
-            ToolIcon(symbol: current.flagged ? "flag.slash" : "flag",
-                     label: current.flagged ? "取消" : "旗标") {
-                let target = !current.flagged
-                Task { await list.setFlagged([summary.uid], target) }
-            }
-            ToolIcon(symbol: "folder", label: "移动") { showMove = true }
-            ToolIcon(symbol: "trash", label: "删除") {
-                let uid = summary.uid
-                Task {
-                    await list.delete([uid])
-                    dismiss()
-                }
-            }
-        }
-        .foregroundColor(.black)
-    }
-
-    private func startCompose(_ mode: ComposeRequest.Mode) {
-        guard let p = parsed else { return }
-        compose = ComposeRequest(mode: mode, account: list.account, original: p,
-                                 originalFolder: list.folder.path, originalUID: summary.uid)
-    }
-
-    // MARK: 载入
-
-    private func load() async {
-        loading = true
-        defer { loading = false }
-        let accountId = list.account.id
-        let path = list.folder.path
-        let uid = summary.uid
-        do {
-            let raw: Data
-            if let cached = DiskCache.loadRaw(account: accountId, folder: path, uid: uid) {
-                raw = cached
-            } else {
-                raw = try await list.client.perform { try await $0.fetchRaw(path, uid: uid) }
-                DiskCache.saveRaw(raw, account: accountId, folder: path, uid: uid)
-            }
-            parsed = await Task.detached { ParsedMessage.parse(raw) }.value
-            if !current.seen {
-                await list.setSeen([uid], true)
-            }
-        } catch {
-            self.error = error.localizedDescription
-        }
-    }
-
-    private func open(_ att: MailAttachment) {
-        let safe = att.filename
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: ":", with: "_")
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let url = dir.appendingPathComponent(safe.isEmpty ? "附件" : safe)
-            try att.data.write(to: url)
-            preview = PreviewItem(url: url)
-        } catch {
-            self.error = "无法打开附件：\(error.localizedDescription)"
-        }
+        decisionHandler(.cancel)
     }
 }
 
-// MARK: - 网页正文
-
+/// 可滚动、可缩放的邮件正文（全屏阅读用）。
 struct HTMLView: UIViewRepresentable {
     let html: String
     var onMailto: ((String) -> Void)?
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
@@ -277,51 +52,158 @@ struct HTMLView: UIViewRepresentable {
         let wv = WKWebView(frame: .zero, configuration: cfg)
         wv.navigationDelegate = context.coordinator
         wv.isOpaque = false
-        wv.backgroundColor = .white
-        wv.scrollView.backgroundColor = .white
+        wv.backgroundColor = .clear
+        wv.scrollView.backgroundColor = .clear
         return wv
     }
 
     func updateUIView(_ wv: WKWebView, context: Context) {
-        context.coordinator.parent = self
+        context.coordinator.onMailto = onMailto
         if context.coordinator.lastHTML != html {
             context.coordinator.lastHTML = html
             wv.loadHTMLString(html, baseURL: nil)
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        var parent: HTMLView
+    final class Coordinator: LinkPolicyCoordinator {
         var lastHTML: String?
+    }
+}
 
-        init(_ parent: HTMLView) {
+/// 高度随内容自动撑开的正文（会话卡片里用），可选折叠引用的历史内容。
+struct AutoHeightHTMLView: UIViewRepresentable {
+    let html: String
+    let hideQuotes: Bool
+    @Binding var height: CGFloat
+    var onQuoteDetected: ((Bool) -> Void)?
+    var onMailto: ((String) -> Void)?
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.defaultWebpagePreferences.allowsContentJavaScript = false
+        cfg.dataDetectorTypes = [.link, .phoneNumber]
+        let ucc = cfg.userContentController
+        ucc.addUserScript(WKUserScript(source: Self.script(hide: hideQuotes), injectionTime: .atDocumentEnd,
+                                       forMainFrameOnly: true, in: .defaultClient))
+        ucc.add(context.coordinator, contentWorld: .defaultClient, name: "retro")
+        let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 1), configuration: cfg)
+        wv.navigationDelegate = context.coordinator
+        wv.isOpaque = false
+        wv.backgroundColor = .clear
+        wv.scrollView.backgroundColor = .clear
+        wv.scrollView.isScrollEnabled = false
+        wv.scrollView.bounces = false
+        context.coordinator.observe(wv)
+        context.coordinator.lastHTML = html
+        wv.loadHTMLString(html, baseURL: nil)
+        return wv
+    }
+
+    func updateUIView(_ wv: WKWebView, context: Context) {
+        context.coordinator.parent = self
+        context.coordinator.onMailto = onMailto
+        if context.coordinator.lastHTML != html {
+            context.coordinator.lastHTML = html
+            wv.loadHTMLString(html, baseURL: nil)
+        }
+    }
+
+    static func dismantleUIView(_ wv: WKWebView, coordinator: Coordinator) {
+        coordinator.observation = nil
+        wv.configuration.userContentController.removeAllScriptMessageHandlers()
+    }
+
+    final class Coordinator: LinkPolicyCoordinator, WKScriptMessageHandler {
+        var parent: AutoHeightHTMLView
+        var lastHTML: String?
+        var observation: NSKeyValueObservation?
+
+        init(_ parent: AutoHeightHTMLView) {
             self.parent = parent
+            super.init()
+            onMailto = parent.onMailto
         }
 
-        func webView(_ webView: WKWebView,
-                     decidePolicyFor navigationAction: WKNavigationAction,
-                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            guard let url = navigationAction.request.url else {
-                decisionHandler(.cancel)
-                return
+        func observe(_ wv: WKWebView) {
+            observation = wv.scrollView.observe(\.contentSize, options: [.new]) { [weak self] sv, _ in
+                let h = ceil(sv.contentSize.height)
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    if h > 0, abs(self.parent.height - h) > 1 {
+                        self.parent.height = h
+                    }
+                }
             }
-            let scheme = url.scheme?.lowercased() ?? ""
-            if scheme == "about" || scheme == "data" {
-                decisionHandler(.allow)
-                return
-            }
-            if scheme == "mailto" {
-                var addr = String(url.absoluteString.dropFirst("mailto:".count))
-                if let q = addr.firstIndex(of: "?") { addr = String(addr[..<q]) }
-                parent.onMailto?(addr.removingPercentEncoding ?? addr)
-                decisionHandler(.cancel)
-                return
-            }
-            if navigationAction.navigationType == .linkActivated {
-                UIApplication.shared.open(url)
-            }
-            decisionHandler(.cancel)
         }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any] else { return }
+            let found = (body["q"] as? Bool) ?? false
+            DispatchQueue.main.async { [weak self] in
+                self?.parent.onQuoteDetected?(found)
+            }
+        }
+    }
+
+    /// 在独立的脚本环境中运行（邮件自身的脚本已被禁用）。
+    static func script(hide: Bool) -> String {
+        """
+        (function(){
+          var HIDE = \(hide ? "true" : "false");
+          function hideQuotes(){
+            var target = document.querySelector('#divRplyFwdMsg, div[id^="divRplyFwdMsg"], div[name="divRplyFwdMsg"], .gmail_quote, .gmail_extra, blockquote[type="cite"], #original-content, .moz-cite-prefix, #appendonsend, .yahoo_quoted, #mail-editor-reference-message-container, #isForwardContent, #isReplyContent, .ne-quoted, .re-quote');
+            if (!target) {
+              var re = /^(-{2,}\\s*(original message|原始邮件|原始郵件|original|forwarded message|转发的邮件)|_{10,}$|在.{2,80}(写|寫)道[:：]|on .{4,160} wrote:)/i;
+              var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+              while (w.nextNode()) {
+                var t = (w.currentNode.nodeValue || '').replace(/\\u00a0/g, ' ').trim();
+                if (!t) continue;
+                if (re.test(t)) { target = w.currentNode.parentElement; break; }
+                if (/^(发件人|寄件者|from)\\s*[:：]/i.test(t)) {
+                  var p = w.currentNode.parentElement;
+                  var blk = (p.closest && p.closest('div,p,td')) || p;
+                  if (/(发送时间|日期|sent|date)\\s*[:：]/i.test(blk.innerText || '')) { target = blk; break; }
+                }
+              }
+            }
+            if (!target || target === document.body) return false;
+            var before = document.createRange();
+            before.setStart(document.body, 0);
+            before.setEndBefore(target);
+            if (before.toString().replace(/\\s/g, '').length === 0) return false;
+            var n = target;
+            while (n && n !== document.body) {
+              var s = n.nextSibling;
+              while (s) {
+                var nx = s.nextSibling;
+                if (s.nodeType === 1) { s.style.display = 'none'; }
+                else if (s.nodeType === 3) { s.nodeValue = ''; }
+                s = nx;
+              }
+              n = n.parentNode;
+            }
+            target.style.display = 'none';
+            return true;
+          }
+          function fit(){
+            try {
+              document.body.style.zoom = 1;
+              var w = document.documentElement.clientWidth;
+              var sw = document.documentElement.scrollWidth;
+              if (sw > w + 4) { document.body.style.zoom = (w / sw).toFixed(3); }
+            } catch (e) {}
+          }
+          var found = false;
+          try { if (HIDE) { found = hideQuotes(); } } catch (e) {}
+          fit();
+          try { window.webkit.messageHandlers.retro.postMessage({ q: found }); } catch (e) {}
+          window.addEventListener('load', fit);
+          var imgs = document.images;
+          for (var i = 0; i < imgs.length; i++) { imgs[i].addEventListener('load', fit); }
+        })();
+        """
     }
 }
 
@@ -354,5 +236,27 @@ struct QuickLookView: UIViewControllerRepresentable {
         func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
             url as NSURL
         }
+    }
+}
+
+enum AttachmentFiles {
+    static func write(_ att: MailAttachment) throws -> URL {
+        let safe = att.filename
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(safe.isEmpty ? "attachment" : safe)
+        try att.data.write(to: url)
+        return url
+    }
+
+    static func icon(for mime: String) -> String {
+        if mime.hasPrefix("image/") { return "photo" }
+        if mime.contains("pdf") { return "doc.richtext" }
+        if mime.contains("zip") || mime.contains("compressed") || mime.contains("rar") { return "doc.zipper" }
+        if mime.contains("sheet") || mime.contains("excel") { return "tablecells" }
+        if mime.hasPrefix("text/") { return "doc.plaintext" }
+        return "doc"
     }
 }

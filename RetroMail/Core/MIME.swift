@@ -469,10 +469,10 @@ struct ParsedMessage {
 
     private static func defaultName(for type: String) -> String {
         switch type {
-        case "message/rfc822": return "转发的邮件.eml"
-        case "text/calendar": return "邀请.ics"
-        case let t where t.hasPrefix("image/"): return "图片." + (t.split(separator: "/").last.map(String.init) ?? "img")
-        default: return "附件"
+        case "message/rfc822": return tr("转发的邮件.eml", "message.eml")
+        case "text/calendar": return tr("邀请.ics", "invite.ics")
+        case let t where t.hasPrefix("image/"): return tr("图片.", "image.") + (t.split(separator: "/").last.map(String.init) ?? "img")
+        default: return tr("附件", "attachment")
         }
     }
 
@@ -484,38 +484,113 @@ struct ParsedMessage {
         return ""
     }
 
+    /// 去掉引用的历史内容后的纯文本。
+    var newText: String { QuoteStripper.strip(plainText).text }
+
+    /// 列表/折叠卡片里显示的摘要。
+    var snippet: String {
+        let t = newText.isEmpty ? plainText : newText
+        let collapsed = t.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        return String(collapsed.prefix(160))
+    }
+
     var hasRemoteContent: Bool {
         guard let h = html else { return false }
         let patterns = ["src=\"http", "src='http", "src=http", "url(http", "url('http", "url(\"http", "background=\"http"]
         return patterns.contains { h.range(of: $0, options: .caseInsensitive) != nil }
     }
 
-    func renderHTML(allowRemote: Bool) -> String {
+    /// 阅读用的完整 HTML 页面。夜间模式通过 CSS 反色处理 HTML 邮件。
+    func renderHTML(allowRemote: Bool, hideQuotes: Bool = false) -> String {
         let csp = allowRemote
             ? "default-src * data: blob: 'unsafe-inline'; script-src 'none';"
             : "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:;"
         let head = """
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="color-scheme" content="light dark">
         <meta http-equiv="Content-Security-Policy" content="\(csp)">
         <style>\(Self.css)</style>
         """
         if let html = html {
-            return "<!doctype html><html><head>\(head)</head><body class=\"html\">\(html)</body></html>"
+            return "<!doctype html><html class=\"htmlmail\"><head>\(head)</head><body class=\"html\">\(html)</body></html>"
         }
-        let body = HTMLText.escape(plainText)
-        return "<!doctype html><html><head>\(head)</head><body class=\"plain\"><pre>\(body)</pre></body></html>"
+        var t = plainText
+        if hideQuotes {
+            let r = QuoteStripper.strip(t)
+            if r.stripped { t = r.text }
+        }
+        let body = HTMLText.escape(t)
+        return "<!doctype html><html class=\"plainmail\"><head>\(head)</head><body class=\"plain\"><pre>\(body)</pre></body></html>"
+    }
+
+    /// 纯文本邮件里是否有可折叠的引用。
+    var plainHasQuote: Bool { html == nil && QuoteStripper.strip(plainText).stripped }
+
+    /// 用于回复/转发时嵌入编辑器的原文 HTML（去掉脚本、样式表等）。
+    var quotableHTML: String {
+        if let h = html { return HTMLText.sanitizeForQuote(h) }
+        return HTMLText.escape(plainText).replacingOccurrences(of: "\n", with: "<br>")
     }
 
     private static let css = """
     html { -webkit-text-size-adjust: 100%; }
+    html, body { height: auto !important; min-height: 0 !important; }
     body { margin: 12px; color: #000; background: #fff; font: 15px -apple-system, "PingFang SC", sans-serif; overflow-wrap: anywhere; word-wrap: break-word; }
     body.plain pre { white-space: pre-wrap; margin: 0; font: 14px Menlo, "PingFang SC", monospace; line-height: 1.5; }
     body.plain a { color: #000; }
     img { max-width: 100% !important; height: auto !important; }
-    table { max-width: 100% !important; }
-    blockquote { margin: 0 0 0 4px; padding-left: 8px; border-left: 2px solid #000; }
+    blockquote { margin: 0 0 0 4px; padding-left: 8px; border-left: 2px solid #888; }
+    @media (prefers-color-scheme: dark) {
+      html.plainmail, body.plain { background: #121212; color: #e9e9e9; }
+      body.plain a { color: #e9e9e9; }
+      html.htmlmail { filter: invert(1) hue-rotate(180deg); background: #fff; }
+      html.htmlmail img, html.htmlmail video, html.htmlmail picture, html.htmlmail [style*="background-image"] { filter: invert(1) hue-rotate(180deg); }
+    }
     """
+}
+
+/// 识别并去掉回复邮件里引用的旧内容（各家客户端的分隔格式）。
+enum QuoteStripper {
+    private static let markers: [NSRegularExpression] = [
+        "^-{2,}\\s*(original message|原始邮件|原始郵件|original|forwarded message|转发的邮件|轉寄的郵件|回复的邮件)\\s*-{2,}",
+        "^-{5,}\\s*$",
+        "^_{10,}\\s*$",
+        "^在.{2,80}写道[:：]\\s*$",
+        "^在.{2,80}寫道[:：]\\s*$",
+        "^on .{4,160} wrote:\\s*$",
+        "^(发件人|寄件者|from)[:：]\\s*.+",
+    ].map { try! NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
+
+    static func strip(_ text: String) -> (text: String, stripped: Bool) {
+        let lines = text.components(separatedBy: "\n")
+        var cut: Int?
+        for (i, raw) in lines.enumerated() {
+            let line = raw.replacingOccurrences(of: "\u{00a0}", with: " ").trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+            let ns = line as NSString
+            let range = NSRange(location: 0, length: ns.length)
+            var hit = markers.contains { $0.firstMatch(in: line, range: range) != nil }
+            if hit, line.lowercased().hasPrefix("from") || line.hasPrefix("发件人") || line.hasPrefix("寄件者") {
+                // “发件人：”必须紧跟着“发送时间/日期/Sent/Date”才算引用头
+                let next = lines.dropFirst(i + 1).prefix(3).joined(separator: " ").lowercased()
+                hit = next.contains("sent") || next.contains("date") || next.contains("发送时间") || next.contains("日期") || next.contains("時間")
+            }
+            if !hit && line.hasPrefix(">") {
+                // 连续以 > 开头直到结尾
+                let rest = lines.dropFirst(i).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                hit = rest.allSatisfy { $0.trimmingCharacters(in: .whitespaces).hasPrefix(">") }
+            }
+            if hit {
+                cut = i
+                break
+            }
+        }
+        guard let c = cut, c > 0 else { return (text, false) }
+        let kept = lines[0..<c].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        if kept.isEmpty { return (text, false) }
+        return (kept, true)
+    }
 }
 
 // MARK: - HTML 辅助
@@ -525,6 +600,22 @@ enum HTMLText {
         s.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    /// 引用原文时清理 HTML：去掉 head/style/script，只保留正文内容。
+    static func sanitizeForQuote(_ html: String) -> String {
+        var s = html
+        for tag in ["script", "style", "head", "title", "xml", "o:p"] {
+            s = s.replacingOccurrences(of: "<\(tag)[^>]*>[\\s\\S]*?</\(tag)>", with: "",
+                                       options: [.regularExpression, .caseInsensitive])
+        }
+        s = s.replacingOccurrences(of: "<!--[\\s\\S]*?-->", with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: "</?(html|body|meta|link|base)[^>]*>", with: "",
+                                   options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: "<!doctype[^>]*>", with: "", options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: "\\son[a-z]+\\s*=\\s*(\"[^\"]*\"|'[^']*')", with: "",
+                                   options: [.regularExpression, .caseInsensitive])
+        return s
     }
 
     private static let entityRegex = try! NSRegularExpression(pattern: "&#(x?)([0-9a-fA-F]+);")

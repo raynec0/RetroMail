@@ -24,11 +24,11 @@ final class SMTPClient {
         try await open()
         _ = try await expect("MAIL FROM:<\(from)>", [250])
         for r in recipients {
-            _ = try await expect("RCPT TO:<\(r)>", [250, 251], label: "收件人 \(r)")
+            _ = try await expect("RCPT TO:<\(r)>", [250, 251], label: tr("收件人 ", "recipient ") + r)
         }
         _ = try await expect("DATA", [354])
         try await socket?.write(Self.dotStuff(message))
-        _ = try await expect(".", [250], label: "发送正文")
+        _ = try await expect(".", [250], label: "DATA")
         _ = try? await expect("QUIT", [221])
     }
 
@@ -38,11 +38,11 @@ final class SMTPClient {
     }
 
     private func open() async throws {
-        guard !config.host.isEmpty else { throw MailError.protocolError("未填写发件服务器地址") }
+        guard !config.host.isEmpty else { throw MailError.protocolError(tr("未填写发件服务器地址", "Outgoing server is not set")) }
         let s = MailSocket(host: config.host, port: config.port, allowInsecure: config.allowInsecure)
         socket = s
         if config.security == .ssl { s.startTLS() }
-        _ = try await expect(nil, [220], label: "连接")
+        _ = try await expect(nil, [220], label: "CONNECT")
         var ehlo = try await expect("EHLO [127.0.0.1]", [250])
         if config.security == .starttls {
             _ = try await expect("STARTTLS", [220])
@@ -69,8 +69,8 @@ final class SMTPClient {
                 _ = try await expect("AUTH PLAIN \(token)", [235], label: "AUTH PLAIN")
             } else {
                 _ = try await expect("AUTH LOGIN", [334])
-                _ = try await expect(Data(config.username.utf8).base64EncodedString(), [334], label: "用户名")
-                _ = try await expect(Data(config.password.utf8).base64EncodedString(), [235], label: "密码")
+                _ = try await expect(Data(config.username.utf8).base64EncodedString(), [334], label: "USER")
+                _ = try await expect(Data(config.password.utf8).base64EncodedString(), [235], label: "PASS")
             }
         } catch MailError.server(let m) {
             throw MailError.auth(m)

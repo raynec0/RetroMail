@@ -13,6 +13,8 @@ struct ComposeRequest: Identifiable {
     var original: ParsedMessage?
     var originalFolder: String?
     var originalUID: Int?
+    /// AI 预先起草的正文（纯文本）
+    var aiDraft: String?
 
     var originalRef: (folder: String, uid: Int)? {
         guard let f = originalFolder, let u = originalUID else { return nil }
@@ -23,19 +25,28 @@ struct ComposeRequest: Identifiable {
 struct ComposeView: View {
     let request: ComposeRequest
     @ObservedObject private var store = AccountStore.shared
+    @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var ed = EditorController()
 
     @State private var accountId: UUID?
     @State private var to = ""
     @State private var cc = ""
     @State private var bcc = ""
     @State private var subject = ""
-    @State private var bodyText = ""
-    @State private var initialBody = ""
     @State private var showCc = false
+    @State private var fieldsExpanded = true
     @State private var attachments: [OutgoingAttachment] = []
-    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var priority: MailPriority = .normal
+    @State private var readReceipt = false
+
+    @State private var sheet: EditorSheet?
+    @State private var attachPhotos: [PhotosPickerItem] = []
+    @State private var inlinePhotos: [PhotosPickerItem] = []
+    @State private var showAttachPhotos = false
+    @State private var showInlinePhotos = false
     @State private var showFiles = false
+
     @State private var busy: String?
     @State private var error: String?
     @State private var confirmClose = false
@@ -47,164 +58,209 @@ struct ComposeView: View {
 
     private var windowTitle: String {
         switch request.mode {
-        case .new: return "新邮件"
-        case .reply, .replyAll: return "回复"
-        case .forward: return "转发"
-        case .draft: return "编辑草稿"
+        case .new: return tr("新邮件", "New Message")
+        case .reply, .replyAll: return tr("回复", "Reply")
+        case .forward: return tr("转发", "Forward")
+        case .draft: return tr("编辑草稿", "Edit Draft")
         }
     }
 
     private var isDirty: Bool {
-        !to.isEmpty || !cc.isEmpty || !subject.isEmpty || bodyText != initialBody || !attachments.isEmpty
+        ed.dirty || !to.isEmpty || !cc.isEmpty || !subject.isEmpty || !attachments.isEmpty
+    }
+
+    /// 给 AI 用的原邮件上下文。
+    private var aiContext: String {
+        guard let o = request.original else { return "" }
+        let from = o.from.first?.full ?? ""
+        let date = o.date.map { Fmt.long($0) } ?? ""
+        return String("From: \(from)\nDate: \(date)\nSubject: \(o.subject)\n\n\(o.plainText)".prefix(12000))
     }
 
     var body: some View {
-        ZStack {
-            DitherBackground()
-            RetroWindow(title: windowTitle, onClose: { if isDirty { confirmClose = true } else { dismiss() } }) {
-                VStack(spacing: 0) {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 8) {
-                            fields
-                            if !attachments.isEmpty { attachmentChips }
-                            TextEditor(text: $bodyText)
-                                .font(RT.font(14))
-                                .scrollContentBackground(.hidden)
-                                .frame(minHeight: 300)
-                                .padding(4)
-                                .overlay(Rectangle().stroke(Color.black, lineWidth: 1))
-                        }
-                        .padding(10)
-                    }
-                    .scrollDismissesKeyboard(.interactively)
-                    RetroDivider()
-                    bottomBar
-                }
+        VStack(spacing: 0) {
+            StripedTitleBar(title: windowTitle, onClose: { if isDirty { confirmClose = true } else { dismiss() } })
+            if ed.focused && !fieldsExpanded {
+                collapsedFields
+            } else {
+                fields
             }
-            .padding(.horizontal, 6)
-            .padding(.top, 4)
-            .padding(.bottom, 8)
+            if !attachments.isEmpty { attachmentStrip }
+            RetroDivider()
+            RichEditorView(controller: ed, placeholder: tr("在此输入正文…", "Write your message…"))
+            FormatRibbon(ed: ed, sheet: $sheet, priority: $priority, readReceipt: $readReceipt,
+                         onInlineImage: { showInlinePhotos = true },
+                         onAttachPhoto: { showAttachPhotos = true },
+                         onAttachFile: { showFiles = true },
+                         onSignature: insertSignature,
+                         onSaveDraft: { saveDraft(thenClose: true) },
+                         onSend: send)
         }
-        .foregroundColor(.black)
+        .foregroundColor(.ink)
+        .background(Color.paper.ignoresSafeArea())
         .busyOverlay(busy != nil, busy ?? "")
         .retroAlert($error)
-        .confirmationDialog("这封邮件还没有发送", isPresented: $confirmClose, titleVisibility: .visible) {
-            Button("存为草稿") { saveDraft(thenClose: true) }
-            Button("放弃", role: .destructive) { dismiss() }
-            Button("继续编辑", role: .cancel) {}
+        .onChange(of: ed.focused) { f in
+            if f { fieldsExpanded = false }
         }
+        .sheet(item: $sheet) { s in
+            EditorSheetView(sheet: s, ed: ed, aiContext: aiContext) { subject = $0 }
+                .preferredColorScheme(settings.colorScheme)
+        }
+        .confirmationDialog(tr("这封邮件还没有发送", "This message hasn't been sent"), isPresented: $confirmClose, titleVisibility: .visible) {
+            Button(tr("存为草稿", "Save Draft")) { saveDraft(thenClose: true) }
+            Button(tr("放弃", "Discard"), role: .destructive) { dismiss() }
+            Button(tr("继续编辑", "Keep Editing"), role: .cancel) {}
+        }
+        .photosPicker(isPresented: $showAttachPhotos, selection: $attachPhotos, maxSelectionCount: 10,
+                      matching: .any(of: [.images, .videos]))
+        .photosPicker(isPresented: $showInlinePhotos, selection: $inlinePhotos, maxSelectionCount: 5, matching: .images)
         .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             importFiles(result)
         }
-        .onChange(of: photoItems) { items in
+        .onChange(of: attachPhotos) { items in
             guard !items.isEmpty else { return }
-            Task { await loadPhotos(items) }
+            Task { await loadAttachmentPhotos(items) }
+        }
+        .onChange(of: inlinePhotos) { items in
+            guard !items.isEmpty else { return }
+            Task { await loadInlinePhotos(items) }
         }
         .onAppear(perform: prepare)
     }
 
-    // MARK: 表单
+    // MARK: 收件人等字段
 
     @ViewBuilder
     private var fields: some View {
-        if store.accounts.count > 1 {
-            HStack(spacing: 6) {
-                Text("发件人").font(RT.font(13, .bold)).frame(width: 76, alignment: .trailing)
-                Menu {
-                    ForEach(store.accounts) { a in
-                        Button(a.title) { accountId = a.id }
-                    }
-                } label: {
-                    HStack {
-                        Text(account?.title ?? "").font(RT.font(13)).lineLimit(1)
-                        Spacer()
-                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 11))
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 6)
-                    .overlay(Rectangle().stroke(Color.black, lineWidth: 1))
-                }
-            }
-        }
-        RetroField(label: "收件人", text: $to, placeholder: "多个地址用逗号分隔", keyboard: .emailAddress)
-        if showCc {
-            RetroField(label: "抄送", text: $cc, keyboard: .emailAddress)
-            RetroField(label: "密送", text: $bcc, keyboard: .emailAddress)
-        } else {
-            HStack {
-                Spacer().frame(width: 82)
-                Button("＋ 抄送 / 密送") { showCc = true }
-                    .font(RT.font(12))
-                    .buttonStyle(.plain)
-            }
-        }
-        RetroField(label: "主题", text: $subject)
-    }
-
-    private var attachmentChips: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(attachments) { a in
+        VStack(alignment: .leading, spacing: 8) {
+            if store.accounts.count > 1 {
                 HStack(spacing: 6) {
-                    Image(systemName: "paperclip")
-                    Text(a.filename).lineLimit(1)
-                    Spacer()
-                    Text(Fmt.size(a.data.count))
-                    Button {
-                        attachments.removeAll { $0.id == a.id }
+                    Text(tr("发件人", "From")).font(RT.font(13, .bold)).frame(width: 80, alignment: .trailing)
+                    Menu {
+                        ForEach(store.accounts) { a in
+                            Button(a.title) { accountId = a.id }
+                        }
                     } label: {
-                        Image(systemName: "xmark.square")
+                        HStack {
+                            Text(account?.title ?? "").font(RT.font(13)).lineLimit(1)
+                            Spacer()
+                            Image(systemName: "chevron.up.chevron.down").font(.system(size: 11))
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 6)
+                        .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
                     }
-                    .buttonStyle(.plain)
                 }
-                .font(RT.font(12))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 5)
-                .overlay(Rectangle().stroke(Color.black, style: StrokeStyle(lineWidth: 1, dash: [2, 2])))
             }
-            Text("共 \(Fmt.size(attachments.reduce(0) { $0 + $1.data.count }))（多数服务器限制 20–50 MB）")
-                .font(RT.font(10))
+            RetroField(label: tr("收件人", "To"), text: $to, placeholder: tr("多个地址用逗号分隔", "Separate with commas"), keyboard: .emailAddress)
+            if showCc {
+                RetroField(label: tr("抄送", "Cc"), text: $cc, keyboard: .emailAddress)
+                RetroField(label: tr("密送", "Bcc"), text: $bcc, keyboard: .emailAddress)
+            }
+            RetroField(label: tr("主题", "Subject"), text: $subject)
+            HStack(spacing: 14) {
+                Spacer().frame(width: 80)
+                if !showCc {
+                    Button(tr("＋ 抄送/密送", "+ Cc/Bcc")) { showCc = true }
+                }
+                if priority != .normal {
+                    Text(priority.label)
+                }
+                if readReceipt {
+                    Text(tr("✓ 已读回执", "✓ Receipt"))
+                }
+                Spacer()
+            }
+            .font(RT.font(11, .bold))
+            .buttonStyle(.plain)
+        }
+        .padding(10)
+    }
+
+    private var collapsedFields: some View {
+        Button {
+            fieldsExpanded = true
+        } label: {
+            HStack(spacing: 6) {
+                Text(tr("致：", "To: ") + (to.isEmpty ? "—" : to)).lineLimit(1)
+                Text("·")
+                Text(subject.isEmpty ? tr("（无主题）", "(No subject)") : subject).lineLimit(1)
+                Spacer()
+                Image(systemName: "chevron.down").font(.system(size: 11, weight: .bold))
+            }
+            .font(RT.font(12))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(InvertOnPressStyle())
+    }
+
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(attachments) { a in
+                    HStack(spacing: 6) {
+                        Image(systemName: "paperclip")
+                        Text(a.filename).lineLimit(1).frame(maxWidth: 150)
+                        Text(Fmt.size(a.data.count)).opacity(0.7)
+                        Button {
+                            attachments.removeAll { $0.id == a.id }
+                        } label: {
+                            Image(systemName: "xmark.square")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .font(RT.font(11))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 5)
+                    .overlay(Rectangle().stroke(Color.ink, style: StrokeStyle(lineWidth: 1, dash: [2, 2])))
+                }
+                Text(tr("共 \(Fmt.size(attachments.reduce(0) { $0 + $1.data.count }))", "Total \(Fmt.size(attachments.reduce(0) { $0 + $1.data.count }))"))
+                    .font(RT.font(10))
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 8)
         }
     }
 
-    private var bottomBar: some View {
-        HStack(spacing: 6) {
-            PhotosPicker(selection: $photoItems, maxSelectionCount: 10, matching: .any(of: [.images, .videos])) {
-                Image(systemName: "photo")
-            }
-            .buttonStyle(RetroButtonStyle(compact: true))
-            Button {
-                showFiles = true
-            } label: {
-                Image(systemName: "paperclip")
-            }
-            .buttonStyle(RetroButtonStyle(compact: true))
-            Spacer(minLength: 0)
-            Button("存草稿") { saveDraft(thenClose: true) }
-                .buttonStyle(RetroButtonStyle(compact: true))
-            Button("发送") { send() }
-                .buttonStyle(RetroButtonStyle(isDefault: true, compact: true))
-        }
-        .padding(8)
+    // MARK: 预填内容
+
+    private func signatureHTML(_ a: MailAccount?) -> String {
+        guard let sig = a?.signature, !sig.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+        let body = HTMLText.escape(sig).replacingOccurrences(of: "\n", with: "<br>")
+        return "<div class=\"re-sig\"><div><br></div><div>--&nbsp;<br>\(body)</div></div>"
     }
 
-    // MARK: 预填
+    private func quoteHeader(_ o: ParsedMessage, forward: Bool) -> String {
+        func row(_ k: String, _ v: String) -> String {
+            v.isEmpty ? "" : "<b>\(k)</b> \(HTMLText.escape(v))<br>"
+        }
+        var h = "<div style=\"border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0 0 0\"><p style=\"margin:0;font-size:10.5pt\">"
+        if forward { h += "<b>\(tr("---------- 转发的邮件 ----------", "---------- Forwarded message ----------"))</b><br>" }
+        h += row(tr("发件人:", "From:"), o.from.map(\.full).joined(separator: ", "))
+        h += row(tr("发送时间:", "Sent:"), o.date.map { Fmt.long($0) } ?? "")
+        h += row(tr("收件人:", "To:"), o.to.map(\.full).joined(separator: ", "))
+        h += row(tr("抄送:", "Cc:"), o.cc.map(\.full).joined(separator: ", "))
+        h += row(tr("主题:", "Subject:"), o.subject)
+        h += "</p></div><div><br></div>"
+        return h
+    }
 
     private func prepare() {
         guard !prepared else { return }
         prepared = true
         accountId = request.account?.id ?? store.accounts.first?.id
         to = request.to
-        let sig = account.map { $0.signature.isEmpty ? "" : "\n\n-- \n" + $0.signature } ?? ""
+        let sig = signatureHTML(account)
+        let draft = request.aiDraft.map { AIText.toHTML($0) } ?? ""
 
         guard let o = request.original else {
-            bodyText = sig
-            initialBody = bodyText
+            ed.setInitialHTML(draft.isEmpty ? (sig.isEmpty ? "" : "<div><br></div>" + sig) : draft + sig)
             return
         }
         let me = account?.email ?? ""
-        let fromLine = o.from.map(\.full).joined(separator: ", ")
-        let when = o.date.map { Fmt.long($0) } ?? ""
-        let original = o.plainText
 
         switch request.mode {
         case .reply, .replyAll:
@@ -217,38 +273,36 @@ struct ComposeView: View {
             }
             toList = unique(toList.filter { $0.email.caseInsensitiveCompare(me) != .orderedSame })
             if toList.isEmpty { toList = primary }
-            ccList = unique(ccList.filter { $0.email.caseInsensitiveCompare(me) != .orderedSame })
+            ccList = unique(ccList.filter { $0.email.caseInsensitiveCompare(me) != .orderedSame && !toList.contains($0) })
             to = toList.map(\.full).joined(separator: ", ")
             cc = ccList.map(\.full).joined(separator: ", ")
             showCc = !cc.isEmpty
             subject = prefixed("Re: ", o.subject)
-            let quoted = original.components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n")
-            bodyText = "\n" + sig + "\n\n在 \(when)，\(fromLine) 写道：\n" + quoted
+            let top = draft.isEmpty ? "<div><br></div>" : draft
+            ed.setInitialHTML(top + sig + "<div class=\"re-quote\"><div><br></div>" + quoteHeader(o, forward: false) + o.quotableHTML + "</div>")
         case .forward:
             subject = prefixed("Fwd: ", o.subject)
-            var head = "\n" + sig + "\n\n---------- 转发的邮件 ----------\n"
-            head += "发件人：\(fromLine)\n"
-            head += "日期：\(when)\n"
-            head += "主题：\(o.subject)\n"
-            head += "收件人：\(o.to.map(\.full).joined(separator: ", "))\n"
-            if !o.cc.isEmpty { head += "抄送：\(o.cc.map(\.full).joined(separator: ", "))\n" }
-            bodyText = head + "\n" + original
-            attachments = o.attachments.map {
-                OutgoingAttachment(filename: $0.filename, mimeType: $0.mimeType, data: $0.data)
-            }
+            attachments = o.attachments.map { OutgoingAttachment(filename: $0.filename, mimeType: $0.mimeType, data: $0.data) }
+            ed.setInitialHTML("<div><br></div>" + draft + sig + "<div class=\"re-quote\"><div><br></div>" + quoteHeader(o, forward: true) + o.quotableHTML + "</div>")
         case .draft:
             to = o.to.map(\.full).joined(separator: ", ")
             cc = o.cc.map(\.full).joined(separator: ", ")
             showCc = !cc.isEmpty
             subject = o.subject
-            bodyText = original
-            attachments = o.attachments.map {
-                OutgoingAttachment(filename: $0.filename, mimeType: $0.mimeType, data: $0.data)
-            }
+            attachments = o.attachments.map { OutgoingAttachment(filename: $0.filename, mimeType: $0.mimeType, data: $0.data) }
+            ed.setInitialHTML(o.quotableHTML)
         case .new:
-            bodyText = sig
+            ed.setInitialHTML(draft + sig)
         }
-        initialBody = bodyText
+    }
+
+    private func insertSignature() {
+        let sig = signatureHTML(account)
+        if sig.isEmpty {
+            error = tr("还没有设置签名。请到“账户设置”里填写。", "No signature yet. Add one in Account Settings.")
+        } else {
+            ed.call("insertHTML", sig)
+        }
     }
 
     private func unique(_ list: [MailAddress]) -> [MailAddress] {
@@ -263,7 +317,7 @@ struct ComposeView: View {
         return prefix + s
     }
 
-    // MARK: 附件
+    // MARK: 图片与附件
 
     private func importFiles(_ result: Result<[URL], Error>) {
         switch result {
@@ -278,7 +332,7 @@ struct ComposeView: View {
                                                           mimeType: OutgoingAttachment.mimeType(forFilename: name),
                                                           data: data))
                 } catch {
-                    self.error = "无法读取文件：\(error.localizedDescription)"
+                    self.error = tr("无法读取文件：", "Couldn't read the file: ") + error.localizedDescription
                 }
             }
         case .failure(let e):
@@ -286,7 +340,7 @@ struct ComposeView: View {
         }
     }
 
-    private func loadPhotos(_ items: [PhotosPickerItem]) async {
+    private func loadAttachmentPhotos(_ items: [PhotosPickerItem]) async {
         let stamp = Int(Date().timeIntervalSince1970)
         for (n, item) in items.enumerated() {
             guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
@@ -300,49 +354,91 @@ struct ComposeView: View {
                 attachments.append(OutgoingAttachment(filename: "IMG_\(stamp)_\(n + 1).\(ext)", mimeType: mime, data: data))
             }
         }
-        photoItems = []
+        attachPhotos = []
+    }
+
+    /// 正文内嵌图片：缩到最长边 1600 像素，转 JPEG（PNG 透明图保留 PNG）。
+    private func loadInlinePhotos(_ items: [PhotosPickerItem]) async {
+        for item in items {
+            guard let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) else { continue }
+            let scaled = Self.downscale(img, maxSide: 1600)
+            let isPNG = item.supportedContentTypes.first?.conforms(to: .png) ?? false
+            let out: Data?
+            let mime: String
+            if isPNG, let png = scaled.pngData(), png.count < 1_500_000 {
+                out = png
+                mime = "image/png"
+            } else {
+                out = scaled.jpegData(compressionQuality: 0.82)
+                mime = "image/jpeg"
+            }
+            if let d = out {
+                ed.call("image", "data:\(mime);base64,\(d.base64EncodedString())")
+            }
+        }
+        inlinePhotos = []
+    }
+
+    static func downscale(_ img: UIImage, maxSide: CGFloat) -> UIImage {
+        let w = img.size.width * img.scale
+        let h = img.size.height * img.scale
+        let longest = max(w, h)
+        guard longest > maxSide else { return img }
+        let ratio = maxSide / longest
+        let size = CGSize(width: floor(w * ratio), height: floor(h * ratio))
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: fmt).image { _ in
+            img.draw(in: CGRect(origin: .zero, size: size))
+        }
     }
 
     // MARK: 发送 / 草稿
 
-    private func buildMail(_ a: MailAccount) -> OutgoingMail {
+    private func buildMail(_ a: MailAccount, html: String, text: String) -> OutgoingMail {
         let o = request.original
         var refs: String?
-        if request.mode == .reply || request.mode == .replyAll || request.mode == .forward,
-           let mid = o?.messageId {
+        if request.mode != .new && request.mode != .draft, let mid = o?.messageId {
             refs = [o?.references, mid].compactMap { $0 }.joined(separator: " ")
         }
         let isReply = request.mode == .reply || request.mode == .replyAll
-        return OutgoingMail(from: a.address,
-                            to: MailAddress.parseInput(to),
-                            cc: MailAddress.parseInput(cc),
-                            bcc: MailAddress.parseInput(bcc),
-                            subject: subject,
-                            body: bodyText,
-                            attachments: attachments,
-                            inReplyTo: isReply ? o?.messageId : nil,
-                            references: refs)
+        var mail = OutgoingMail(from: a.address,
+                                to: MailAddress.parseInput(to),
+                                cc: MailAddress.parseInput(cc),
+                                bcc: MailAddress.parseInput(bcc),
+                                subject: subject,
+                                body: text,
+                                html: html,
+                                attachments: attachments,
+                                inReplyTo: isReply ? o?.messageId : nil,
+                                references: refs)
+        mail.priority = priority
+        mail.readReceipt = readReceipt
+        return mail
     }
 
     private func send() {
         guard let a = account else {
-            error = "请先添加邮箱账户。"
-            return
-        }
-        let mail = buildMail(a)
-        guard !mail.allRecipients.isEmpty else {
-            error = "请填写至少一个有效的收件人地址。"
+            error = tr("请先添加邮箱账户。", "Add a mail account first.")
             return
         }
         let typed = [to, cc, bcc].joined(separator: ",").filter { $0 == "@" }.count
-        if typed > mail.allRecipients.count {
-            error = "有收件人地址无法识别，请检查格式，例如：张三 <zhang@example.com>"
+        let parsed = MailAddress.parseInput(to).count + MailAddress.parseInput(cc).count + MailAddress.parseInput(bcc).count
+        guard parsed > 0 else {
+            error = tr("请填写至少一个有效的收件人地址。", "Enter at least one valid recipient.")
+            return
+        }
+        if typed > parsed {
+            error = tr("有收件人地址无法识别，请检查格式，例如：张三 <zhang@example.com>", "A recipient address couldn't be read. Use a format like: Jane <jane@example.com>")
             return
         }
         let answered = (request.mode == .reply || request.mode == .replyAll) ? request.originalRef : nil
         let removeDraft = request.mode == .draft ? request.originalRef : nil
-        busy = "正在发送…"
+        busy = tr("正在发送…", "Sending…")
         Task {
+            let html = await ed.html()
+            let text = await ed.text()
+            let mail = buildMail(a, html: html, text: text)
             do {
                 try await MailCenter.shared.send(mail, account: a, answered: answered, removeDraft: removeDraft)
                 busy = nil
@@ -355,11 +451,16 @@ struct ComposeView: View {
     }
 
     private func saveDraft(thenClose: Bool) {
-        guard let a = account else { dismiss(); return }
-        let mail = buildMail(a)
+        guard let a = account else {
+            dismiss()
+            return
+        }
         let replacing = request.mode == .draft ? request.originalRef : nil
-        busy = "正在保存草稿…"
+        busy = tr("正在保存草稿…", "Saving draft…")
         Task {
+            let html = await ed.html()
+            let text = await ed.text()
+            let mail = buildMail(a, html: html, text: text)
             do {
                 try await MailCenter.shared.saveDraft(mail, account: a, replacing: replacing)
                 busy = nil

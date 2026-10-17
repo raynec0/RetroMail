@@ -9,7 +9,7 @@ enum MailSecurity: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .ssl: return "SSL/TLS"
         case .starttls: return "STARTTLS"
-        case .none: return "不加密"
+        case .none: return tr("不加密", "None")
         }
     }
 }
@@ -32,11 +32,11 @@ enum MailError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .connection(let m): return "连接失败：\(m)"
+        case .connection(let m): return tr("连接失败：", "Connection failed: ") + m
         case .protocolError(let m): return m
-        case .auth(let m): return "登录失败：\(m)\n请检查用户名和密码（部分邮箱需要使用“客户端授权码”）。"
-        case .server(let m): return "服务器返回错误：\(m)"
-        case .closed: return "连接已被服务器关闭，请重试。"
+        case .auth(let m): return tr("登录失败：", "Sign-in failed: ") + m + "\n" + tr("请检查用户名和密码（部分邮箱需要使用“客户端授权码”）。", "Check the username and password (some providers require an app-specific password).")
+        case .server(let m): return tr("服务器返回错误：", "Server error: ") + m
+        case .closed: return tr("连接已被服务器关闭，请重试。", "The server closed the connection. Please try again.")
         }
     }
 

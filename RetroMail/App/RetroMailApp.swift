@@ -4,12 +4,15 @@ import UIKit
 @main
 struct RetroMailApp: App {
     @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var settings = AppSettings.shared
 
     var body: some Scene {
         WindowGroup {
             DesktopView()
-                .preferredColorScheme(.light)
-                .tint(.black)
+                .id(settings.language)
+                .environmentObject(settings)
+                .preferredColorScheme(settings.colorScheme)
+                .tint(Color.ink)
         }
         .onChange(of: scenePhase) { phase in
             if phase == .background {
