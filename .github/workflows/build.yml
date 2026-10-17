@@ -4,11 +4,35 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Apply uploaded update zip (if any)
+        run: |
+          shopt -s nullglob
+          zips=( *.zip )
+          if [ ${#zips[@]} -gt 0 ]; then
+            for z in "${zips[@]}"; do
+              echo "Applying $z"
+              rm -rf _update && mkdir _update
+              unzip -q -o "$z" -d _update
+              src=_update
+              if [ -f _update/RetroMail/project.yml ]; then src=_update/RetroMail; fi
+              rsync -a --exclude '.github' --exclude '__MACOSX' "$src"/ ./
+              rm -rf _update "$z"
+            done
+            git config user.name "github-actions[bot]"
+            git config user.email "41898181+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "Apply update from uploaded zip" || true
+            git push || echo "Push failed; building with the applied files anyway"
+          fi
 
       - name: Show Xcode version
         run: xcodebuild -version
