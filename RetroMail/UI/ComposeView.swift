@@ -22,6 +22,11 @@ struct ComposeRequest: Identifiable {
     }
 }
 
+struct RibbonSheet {
+    let title: String
+    let actions: [SheetAction]
+}
+
 struct ComposeView: View {
     let request: ComposeRequest
     @ObservedObject private var store = AccountStore.shared
@@ -50,6 +55,7 @@ struct ComposeView: View {
     @State private var busy: String?
     @State private var error: String?
     @State private var confirmClose = false
+    @State private var ribbonSheet: RibbonSheet?
     @State private var prepared = false
 
     private var account: MailAccount? {
@@ -79,7 +85,13 @@ struct ComposeView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            StripedTitleBar(title: windowTitle, onClose: { if isDirty { confirmClose = true } else { dismiss() } })
+            IOS3NavBar(title: windowTitle) {
+                Button(tr("取消", "Cancel")) { if isDirty { confirmClose = true } else { dismiss() } }
+                    .buttonStyle(BarButtonStyle())
+            } trailing: {
+                Button(tr("发送", "Send"), action: send)
+                    .buttonStyle(BarButtonStyle(kind: .done))
+            }
             if ed.focused && !fieldsExpanded {
                 collapsedFields
             } else {
@@ -94,10 +106,11 @@ struct ComposeView: View {
                          onAttachFile: { showFiles = true },
                          onSignature: insertSignature,
                          onSaveDraft: { saveDraft(thenClose: true) },
-                         onSend: send)
+                         onSend: send,
+                         onActionSheet: { title, actions in ribbonSheet = RibbonSheet(title: title, actions: actions) })
         }
         .foregroundColor(.ink)
-        .background(Color.paper.ignoresSafeArea())
+        .background(IOS3.cell.ignoresSafeArea())
         .busyOverlay(busy != nil, busy ?? "")
         .retroAlert($error)
         .onChange(of: ed.focused) { f in
@@ -107,11 +120,12 @@ struct ComposeView: View {
             EditorSheetView(sheet: s, ed: ed, aiContext: aiContext) { subject = $0 }
                 .preferredColorScheme(settings.colorScheme)
         }
-        .confirmationDialog(tr("这封邮件还没有发送", "This message hasn't been sent"), isPresented: $confirmClose, titleVisibility: .visible) {
-            Button(tr("存为草稿", "Save Draft")) { saveDraft(thenClose: true) }
-            Button(tr("放弃", "Discard"), role: .destructive) { dismiss() }
-            Button(tr("继续编辑", "Keep Editing"), role: .cancel) {}
-        }
+        .ios3ActionSheet(isPresented: Binding(get: { ribbonSheet != nil }, set: { if !$0 { ribbonSheet = nil } }),
+                         title: ribbonSheet?.title, actions: ribbonSheet?.actions ?? [])
+        .ios3ActionSheet(isPresented: $confirmClose, actions: [
+            SheetAction(tr("删除草稿", "Delete Draft"), role: .destructive) { dismiss() },
+            SheetAction(tr("存储草稿", "Save Draft")) { saveDraft(thenClose: true) },
+        ])
         .photosPicker(isPresented: $showAttachPhotos, selection: $attachPhotos, maxSelectionCount: 10,
                       matching: .any(of: [.images, .videos]))
         .photosPicker(isPresented: $showInlinePhotos, selection: $inlinePhotos, maxSelectionCount: 5, matching: .images)
@@ -131,51 +145,83 @@ struct ComposeView: View {
 
     // MARK: 收件人等字段
 
+    /// iPhone OS 3 写信页的一行：灰色标签 + 输入框，下面一条分隔线。
+    private func fieldRow(_ label: String, _ text: Binding<String>, keyboard: UIKeyboardType = .default) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(RT.font(15))
+                .foregroundColor(IOS3.secondary)
+                .lineLimit(1)
+                .fixedSize()
+            TextField("", text: text)
+                .font(RT.font(15))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(keyboard)
+        }
+        .padding(.horizontal, 10)
+        .frame(minHeight: 42)
+        .overlay(alignment: .bottom) { RetroDivider() }
+    }
+
     @ViewBuilder
     private var fields: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if store.accounts.count > 1 {
-                HStack(spacing: 6) {
-                    Text(tr("发件人", "From")).font(RT.font(13, .bold)).frame(width: 80, alignment: .trailing)
-                    Menu {
-                        ForEach(store.accounts) { a in
-                            Button(a.title) { accountId = a.id }
-                        }
-                    } label: {
-                        HStack {
-                            Text(account?.title ?? "").font(RT.font(13)).lineLimit(1)
-                            Spacer()
-                            Image(systemName: "chevron.up.chevron.down").font(.system(size: 11))
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 6)
-                        .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
-                    }
-                }
-            }
-            RetroField(label: tr("收件人", "To"), text: $to, placeholder: tr("多个地址用逗号分隔", "Separate with commas"), keyboard: .emailAddress)
+        VStack(spacing: 0) {
+            fieldRow(tr("收件人：", "To:"), $to, keyboard: .emailAddress)
             if showCc {
-                RetroField(label: tr("抄送", "Cc"), text: $cc, keyboard: .emailAddress)
-                RetroField(label: tr("密送", "Bcc"), text: $bcc, keyboard: .emailAddress)
+                fieldRow(tr("抄送：", "Cc:"), $cc, keyboard: .emailAddress)
+                fieldRow(tr("密送：", "Bcc:"), $bcc, keyboard: .emailAddress)
+            } else {
+                Button {
+                    showCc = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(tr("抄送/密送：", "Cc/Bcc:")).font(RT.font(15)).foregroundColor(IOS3.secondary)
+                        if store.accounts.count > 1 {
+                            Text(tr("发件人：", "From:") + " " + (account?.email ?? ""))
+                                .font(RT.font(15)).foregroundColor(IOS3.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(minHeight: 42)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .overlay(alignment: .bottom) { RetroDivider() }
             }
-            RetroField(label: tr("主题", "Subject"), text: $subject)
-            HStack(spacing: 14) {
-                Spacer().frame(width: 80)
-                if !showCc {
-                    Button(tr("＋ 抄送/密送", "+ Cc/Bcc")) { showCc = true }
+            if showCc && store.accounts.count > 1 {
+                Menu {
+                    ForEach(store.accounts) { a in
+                        Button(a.title) { accountId = a.id }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(tr("发件人：", "From:")).font(RT.font(15)).foregroundColor(IOS3.secondary)
+                        Text(account?.title ?? "").font(RT.font(15)).foregroundColor(.ink).lineLimit(1)
+                        Spacer()
+                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 11)).foregroundColor(IOS3.secondary)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(minHeight: 42)
                 }
-                if priority != .normal {
-                    Text(priority.label)
-                }
-                if readReceipt {
-                    Text(tr("✓ 已读回执", "✓ Receipt"))
-                }
-                Spacer()
+                .overlay(alignment: .bottom) { RetroDivider() }
             }
-            .font(RT.font(11, .bold))
-            .buttonStyle(.plain)
+            HStack(spacing: 0) {
+                fieldRow(tr("主题：", "Subject:"), $subject)
+                if priority != .normal || readReceipt {
+                    HStack(spacing: 4) {
+                        if priority == .high { Image(systemName: "exclamationmark").foregroundColor(.red) }
+                        if priority == .low { Image(systemName: "arrow.down").foregroundColor(IOS3.value) }
+                        if readReceipt { Image(systemName: "checkmark.seal").foregroundColor(IOS3.value) }
+                    }
+                    .font(.system(size: 13, weight: .bold))
+                    .padding(.trailing, 10)
+                    .frame(minHeight: 42)
+                    .overlay(alignment: .bottom) { RetroDivider() }
+                }
+            }
         }
-        .padding(10)
     }
 
     private var collapsedFields: some View {
@@ -183,18 +229,20 @@ struct ComposeView: View {
             fieldsExpanded = true
         } label: {
             HStack(spacing: 6) {
-                Text(tr("致：", "To: ") + (to.isEmpty ? "—" : to)).lineLimit(1)
-                Text("·")
-                Text(subject.isEmpty ? tr("（无主题）", "(No subject)") : subject).lineLimit(1)
+                Text(tr("收件人：", "To:")).foregroundColor(IOS3.secondary)
+                Text(to.isEmpty ? "—" : to).lineLimit(1)
+                Text("·").foregroundColor(IOS3.secondary)
+                Text(subject.isEmpty ? tr("（无主题）", "(No Subject)") : subject).lineLimit(1)
                 Spacer()
-                Image(systemName: "chevron.down").font(.system(size: 11, weight: .bold))
+                Image(systemName: "chevron.down").font(.system(size: 11, weight: .bold)).foregroundColor(IOS3.chevron)
             }
-            .font(RT.font(12))
+            .font(RT.font(14))
             .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .frame(minHeight: 38)
             .contentShape(Rectangle())
+            .overlay(alignment: .bottom) { RetroDivider() }
         }
-        .buttonStyle(InvertOnPressStyle())
+        .buttonStyle(.plain)
     }
 
     private var attachmentStrip: some View {
@@ -212,16 +260,19 @@ struct ComposeView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    .font(RT.font(11))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 5)
-                    .overlay(Rectangle().stroke(Color.ink, style: StrokeStyle(lineWidth: 1, dash: [2, 2])))
+                    .font(RT.font(12, .bold))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(LinearGradient(colors: [HexColor.color("#E9EFF8"), HexColor.color("#CBD8EC")], startPoint: .top, endPoint: .bottom)))
+                    .overlay(Capsule().stroke(HexColor.color("#9DB3D3"), lineWidth: 1))
                 }
                 Text(tr("共 \(Fmt.size(attachments.reduce(0) { $0 + $1.data.count }))", "Total \(Fmt.size(attachments.reduce(0) { $0 + $1.data.count }))"))
-                    .font(RT.font(10))
+                    .font(RT.font(12))
+                    .foregroundColor(IOS3.secondary)
             }
             .padding(.horizontal, 10)
-            .padding(.bottom, 8)
+            .padding(.vertical, 7)
         }
     }
 

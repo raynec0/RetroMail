@@ -19,7 +19,7 @@ final class IMAPConnection: @unchecked Sendable {
     private(set) var selected: String?
     private(set) var selectedExists = 0
 
-    static let summaryItems = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID CONTENT-TYPE IN-REPLY-TO REFERENCES)])"
+    static let summaryItems = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID CONTENT-TYPE CONTENT-TRANSFER-ENCODING IN-REPLY-TO REFERENCES)])"
 
     init(config: ServerConfig) {
         self.config = config
@@ -341,6 +341,29 @@ final class IMAPConnection: @unchecked Sendable {
         guard !uids.isEmpty else { return [] }
         let f = try await run("UID FETCH \(Self.uidSet(uids)) \(Self.summaryItems)")
         return Self.parseSummaries(f.untagged)
+    }
+
+    /// 取每封邮件正文的前一小段（用于列表里的两行预览）。
+    func fetchPreviews(_ path: String, uids: [Int], bytes: Int = 1500) async throws -> [Int: Data] {
+        guard !uids.isEmpty else { return [:] }
+        try await select(path)
+        let r = try await run("UID FETCH \(Self.uidSet(uids)) (UID BODY.PEEK[TEXT]<0.\(bytes)>)")
+        var out: [Int: Data] = [:]
+        for d in r.untagged {
+            let v = IMAPParser.parse(d)
+            guard v.count >= 4, v[2].string?.uppercased() == "FETCH", let items = v[3].list else { continue }
+            var uid: Int?
+            var body: Data?
+            var k = 0
+            while k + 1 < items.count {
+                let key = (items[k].string ?? "").uppercased()
+                if key == "UID" { uid = Int(items[k + 1].string ?? "") }
+                if key.hasPrefix("BODY[TEXT]") { body = items[k + 1].data }
+                k += 2
+            }
+            if let u = uid { out[u] = body ?? Data() }
+        }
+        return out
     }
 
     func fetchRaw(_ path: String, uid: Int) async throws -> Data {

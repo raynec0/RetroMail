@@ -43,7 +43,10 @@ struct AccountEditView: View {
     }
 
     var body: some View {
-        RetroScreen(title: existing == nil ? tr("新建账户", "New Account") : tr("账户设置", "Account Settings")) {
+        RetroScreen(title: existing == nil ? tr("新建账户", "New Account") : (existing!.name.isEmpty ? existing!.email : existing!.name)) {
+            Button(tr("存储", "Save")) { save() }
+                .buttonStyle(BarButtonStyle(kind: .done))
+        } content: {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     identityGroup
@@ -58,12 +61,10 @@ struct AccountEditView: View {
         }
         .busyOverlay(testing, tr("正在测试连接…", "Testing connection…"))
         .retroAlert($message)
-        .confirmationDialog(tr("删除这个账户？本机上的缓存也会一并清除，服务器上的邮件不受影响。",
-                               "Delete this account? Local cache will be removed; mail on the server is not affected."),
-                            isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button(tr("删除账户", "Delete Account"), role: .destructive) { deleteAccount() }
-            Button(tr("取消", "Cancel"), role: .cancel) {}
-        }
+        .ios3ActionSheet(isPresented: $confirmDelete,
+                         title: tr("删除这个账户后，本机上的缓存也会一并清除，服务器上的邮件不受影响。",
+                                   "Deleting this account removes its local cache. Mail on the server is not affected."),
+                         actions: [SheetAction(tr("删除账户", "Delete Account"), role: .destructive) { deleteAccount() }])
         .onChange(of: a.email) { newValue in autofill(newValue) }
         .onChange(of: a.imapSecurity) { s in
             a.imapPort = s == .ssl ? 993 : 143
@@ -82,13 +83,12 @@ struct AccountEditView: View {
             RetroField(label: tr("显示名称", "Name"), text: $a.name, placeholder: tr("如：张三", "e.g. Jane Smith"))
             RetroField(label: tr("邮箱地址", "Email"), text: $a.email, placeholder: "name@company.com", keyboard: .emailAddress)
             HStack(alignment: .top, spacing: 6) {
-                Text(tr("签名", "Signature")).font(RT.font(13, .bold)).frame(width: 80, alignment: .trailing).padding(.top, 6)
+                Text(tr("签名", "Signature")).font(RT.font(15, .bold)).frame(width: 92, alignment: .leading).padding(.top, 8)
                 TextEditor(text: $a.signature)
-                    .font(RT.font(13))
+                    .font(RT.font(15))
+                    .foregroundColor(IOS3.value)
                     .scrollContentBackground(.hidden)
                     .frame(height: 70)
-                    .padding(2)
-                    .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
             }
         }
     }
@@ -136,24 +136,32 @@ struct AccountEditView: View {
     }
 
     private var actions: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                if existing != nil {
-                    Button(tr("删除", "Delete")) { confirmDelete = true }
-                        .buttonStyle(RetroButtonStyle(compact: true))
-                }
-                Spacer()
-                Button(tr("测试连接", "Test")) { test() }
-                    .buttonStyle(RetroButtonStyle())
-                Button(tr("存储", "Save")) { save() }
-                    .buttonStyle(RetroButtonStyle(isDefault: true))
-            }
+        VStack(spacing: 14) {
             Text(tr("提示：企业邮箱需由管理员开启 IMAP/SMTP；开启了安全登录的邮箱请使用客户端专用密码。",
                     "Tip: company mailboxes may need IMAP/SMTP enabled by an admin; accounts with 2-step sign-in need an app password."))
-                .font(RT.font(11))
+                .font(RT.font(14))
+                .foregroundColor(IOS3.groupHeader)
+                .shadow(color: IOS3.groupHeaderShadow, radius: 0, x: 0, y: 1)
+                .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
+            Button { test() } label: {
+                Text(tr("测试连接", "Test Connection")).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(RetroButtonStyle())
+            Button { save() } label: {
+                Text(tr("存储", "Save")).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(RetroButtonStyle(isDefault: true))
+            if existing != nil {
+                Button { confirmDelete = true } label: {
+                    Text(tr("删除账户", "Delete Account")).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(RetroButtonStyle(destructive: true))
+                .padding(.top, 10)
+            }
         }
-        .padding(.top, 14)
+        .padding(.top, 16)
+        .padding(.bottom, 20)
     }
 
     private func intBinding(_ kp: WritableKeyPath<MailAccount, Int>) -> Binding<String> {
@@ -267,7 +275,7 @@ struct SettingsView: View {
     @State private var aiConfigured = AIConfig.isConfigured
 
     var body: some View {
-        RetroScreen(title: tr("控制面板", "Control Panel")) {
+        RetroScreen(title: tr("设置", "Settings"), back: tr("邮箱", "Mailboxes")) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     RetroGroup(tr("外观与语言", "Appearance & Language")) {
@@ -287,23 +295,26 @@ struct SettingsView: View {
                         ForEach(store.accounts) { a in
                             NavigationLink(value: Route.account(a)) {
                                 HStack {
-                                    Image(systemName: "person.crop.square")
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(a.name.isEmpty ? a.email : a.name).font(RT.font(14, .bold))
-                                        Text("\(a.email) · \(a.imapHost)").font(RT.font(11)).lineLimit(1)
+                                        Text(a.name.isEmpty ? a.email : a.name).font(RT.font(16, .bold))
+                                        Text("\(a.email) · \(a.imapHost)").font(RT.font(13)).foregroundColor(IOS3.secondary).lineLimit(1)
                                     }
                                     Spacer()
-                                    Image(systemName: "chevron.right").font(.system(size: 12, weight: .bold))
+                                    Chevron()
                                 }
-                                .padding(9)
                                 .contentShape(Rectangle())
                             }
-                            .buttonStyle(TileStyle())
+                            .buttonStyle(.plain)
                         }
                         NavigationLink(value: Route.account(nil)) {
-                            Label(tr("添加账户…", "Add Account…"), systemImage: "plus")
+                            HStack {
+                                Text(tr("添加账户…", "Add Account…")).font(RT.font(16, .bold)).foregroundColor(IOS3.value)
+                                Spacer()
+                                Chevron()
+                            }
+                            .contentShape(Rectangle())
                         }
-                        .buttonStyle(RetroButtonStyle(compact: true))
+                        .buttonStyle(.plain)
                     }
 
                     RetroGroup(tr("AI 助手", "AI Assistant")) {
@@ -344,8 +355,8 @@ struct SettingsView: View {
                     }
 
                     RetroGroup(tr("关于", "About")) {
-                        Text(tr("RetroMail 2.1\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
-                                "RetroMail 2.1\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
+                        Text(tr("RetroMail 3.0\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
+                                "RetroMail 3.0\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
                             .font(RT.font(12))
                             .fixedSize(horizontal: false, vertical: true)
                     }

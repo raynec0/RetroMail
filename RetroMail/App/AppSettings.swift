@@ -85,7 +85,7 @@ extension Color {
     /// 墨色：日间黑、夜间近白
     static let ink = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.92, alpha: 1) : .black })
     /// 纸色：日间白、夜间近黑
-    static let paper = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.07, alpha: 1) : .white })
+    static let paper = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1) : .white })
     /// 浅灰：选中、按钮渐变底部
     static let shade = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.24, alpha: 1) : UIColor(white: 0.84, alpha: 1) })
     /// 更浅的灰：按钮渐变

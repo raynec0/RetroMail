@@ -32,18 +32,16 @@ struct FormatRibbon: View {
     var onSignature: () -> Void
     var onSaveDraft: () -> Void
     var onSend: () -> Void
+    /// 动作表交给写信页显示（覆盖整个屏幕）
+    var onActionSheet: (String, [SheetAction]) -> Void = { _, _ in }
 
     @State private var tab: RibbonTab = .home
-    @State private var showCase = false
-    @State private var showPriority = false
-    @State private var showAttach = false
     @State private var painterHint: String?
 
     private let size: CGFloat = 46
 
     var body: some View {
         VStack(spacing: 0) {
-            RetroDivider()
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     tiles
@@ -52,57 +50,38 @@ struct FormatRibbon: View {
                 .padding(.top, 8)
                 .padding(.bottom, 9)
             }
-            .background(Color.mist)
-            RetroDivider()
-            HStack(spacing: 6) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 4) {
-                        ForEach(RibbonTab.allCases) { t in
-                            Button {
-                                tab = t
-                            } label: {
-                                Text(t.title)
-                                    .font(RT.font(12, .bold))
-                                    .padding(.horizontal, 9)
-                                    .padding(.vertical, 6)
-                                    .foregroundColor(tab == t ? .paper : .ink)
-                                    .background(tab == t ? Color.ink : Color.paper)
-                                    .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.vertical, 4)
+            .background(IOS3.bar)
+            .overlay(alignment: .top) {
+                VStack(spacing: 0) {
+                    Rectangle().fill(IOS3.barBorder).frame(height: 1)
+                    Rectangle().fill(IOS3.barHighlight.opacity(0.7)).frame(height: 1)
                 }
-                Button {
-                    onSend()
-                } label: {
-                    Label(tr("发送", "Send"), systemImage: "paperplane.fill")
-                }
-                .buttonStyle(RetroButtonStyle(isDefault: true, compact: true))
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(Color.paper)
+            IOS3Segmented(options: RibbonTab.allCases.map { ($0, $0.title) }, selection: $tab)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(LinearGradient(stops: IOS3.searchStops, startPoint: .top, endPoint: .bottom))
         }
         .foregroundColor(.ink)
-        .confirmationDialog(tr("更改大小写", "Change Case"), isPresented: $showCase) {
-            Button(tr("全部大写 ABC", "UPPERCASE")) { ed.call("changeCase", "upper") }
-            Button(tr("全部小写 abc", "lowercase")) { ed.call("changeCase", "lower") }
-            Button(tr("首字母大写 Abc", "Capitalize Each Word")) { ed.call("changeCase", "title") }
-            Button(tr("取消", "Cancel"), role: .cancel) {}
-        }
-        .confirmationDialog(tr("重要性", "Importance"), isPresented: $showPriority) {
-            ForEach(MailPriority.allCases) { p in
-                Button(p.label) { priority = p }
-            }
-            Button(tr("取消", "Cancel"), role: .cancel) {}
-        }
-        .confirmationDialog(tr("添加附件", "Attach"), isPresented: $showAttach) {
-            Button(tr("照片或视频", "Photo or Video")) { onAttachPhoto() }
-            Button(tr("文件", "File")) { onAttachFile() }
-            Button(tr("取消", "Cancel"), role: .cancel) {}
-        }
+    }
+
+    private var caseActions: [SheetAction] {
+        [
+            SheetAction(tr("全部大写 ABC", "UPPERCASE")) { ed.call("changeCase", "upper") },
+            SheetAction(tr("全部小写 abc", "lowercase")) { ed.call("changeCase", "lower") },
+            SheetAction(tr("首字母大写 Abc", "Capitalize Each Word")) { ed.call("changeCase", "title") },
+        ]
+    }
+
+    private var priorityActions: [SheetAction] {
+        MailPriority.allCases.map { p in SheetAction(p.label) { priority = p } }
+    }
+
+    private var attachActions: [SheetAction] {
+        [
+            SheetAction(tr("照片或视频", "Photo or Video")) { onAttachPhoto() },
+            SheetAction(tr("文件", "File")) { onAttachFile() },
+        ]
     }
 
     @ViewBuilder
@@ -125,7 +104,8 @@ struct FormatRibbon: View {
     }
 
     private var separator: some View {
-        Rectangle().fill(Color.ink.opacity(0.5)).frame(width: 1, height: size - 8)
+        Rectangle().fill(Color.black.opacity(0.35)).frame(width: 1, height: size - 8)
+            .overlay(alignment: .trailing) { Rectangle().fill(Color.white.opacity(0.3)).frame(width: 1).offset(x: 1) }
     }
 
     // MARK: 开始
@@ -194,7 +174,7 @@ struct FormatRibbon: View {
         tile("link.badge.plus", tr("取消链接", "Unlink")) { ed.call("unlink") }
         separator
         tile("photo", tr("插入图片", "Picture")) { onInlineImage() }
-        tile("paperclip", tr("附件", "Attach")) { showAttach = true }
+        tile("paperclip", tr("附件", "Attach")) { onActionSheet(tr("添加附件", "Attach"), attachActions) }
         tile("tablecells", tr("表格", "Table")) { sheet = .table }
         }
         separator
@@ -241,11 +221,11 @@ struct FormatRibbon: View {
     private var toolTiles: some View {
         tile("sparkles", tr("AI 写作", "AI Write")) { sheet = .ai }
         tile("magnifyingglass", tr("查找替换", "Find")) { sheet = .find }
-        glyph("Aa", .system(size: 16, weight: .bold), tr("大小写", "Case")) { showCase = true }
+        glyph("Aa", .system(size: 16, weight: .bold), tr("大小写", "Case")) { onActionSheet(tr("更改大小写", "Change Case"), caseActions) }
         separator
         tile(priority == .low ? "arrow.down" : "exclamationmark",
              priority == .high ? tr("重要：高", "High") : priority == .low ? tr("重要：低", "Low") : tr("重要性", "Priority"),
-             active: priority != .normal) { showPriority = true }
+             active: priority != .normal) { onActionSheet(tr("重要性", "Importance"), priorityActions) }
         tile("checkmark.seal", tr("已读回执", "Receipt"), active: readReceipt) { readReceipt.toggle() }
         separator
         tile("tray.and.arrow.down", tr("存草稿", "Save Draft")) { onSaveDraft() }
@@ -506,7 +486,7 @@ struct BulletSheet: View {
                                 ForEach(0..<3, id: \.self) { _ in
                                     HStack(spacing: 6) {
                                         Text(opt.1).font(.system(size: 13))
-                                        Rectangle().fill(Color.ink.opacity(0.5)).frame(height: 2)
+                                        Rectangle().fill(Color.white.opacity(0.75)).frame(height: 2)
                                     }
                                 }
                             }
@@ -551,7 +531,7 @@ struct NumberingSheet: View {
                                 ForEach(opt.1, id: \.self) { n in
                                     HStack(spacing: 6) {
                                         Text(n).font(RT.font(12, .bold)).frame(width: 30, alignment: .leading)
-                                        Rectangle().fill(Color.ink.opacity(0.5)).frame(height: 2)
+                                        Rectangle().fill(Color.white.opacity(0.75)).frame(height: 2)
                                     }
                                 }
                             }
@@ -652,8 +632,10 @@ struct LinkSheet: View {
     var body: some View {
         RetroPanel(tr("超链接", "Hyperlink")) {
             VStack(alignment: .leading, spacing: 14) {
-                RetroField(label: tr("显示文字", "Text"), text: $text, placeholder: tr("可留空", "Optional"))
-                RetroField(label: tr("地址", "Address"), text: $url, placeholder: "https://… / name@…", keyboard: .URL)
+                RetroGroup("") {
+                    RetroField(label: tr("显示文字", "Text"), text: $text, placeholder: tr("可留空", "Optional"))
+                    RetroField(label: tr("地址", "Address"), text: $url, placeholder: "https://… / name@…", keyboard: .URL)
+                }
                 HStack(spacing: 12) {
                     if !ed.state.link.isEmpty {
                         Button(tr("删除链接", "Remove")) {
@@ -702,20 +684,22 @@ struct TableSheet: View {
         RetroPanel(tr("插入表格", "Insert Table")) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    Stepper(value: $rows, in: 1...30) {
-                        Text(tr("行数：\(rows)", "Rows: \(rows)")).font(RT.font(14, .bold))
+                    RetroGroup("") {
+                        Stepper(value: $rows, in: 1...30) {
+                            Text(tr("行数：\(rows)", "Rows: \(rows)")).font(RT.font(15, .bold))
+                        }
+                        Stepper(value: $cols, in: 1...12) {
+                            Text(tr("列数：\(cols)", "Columns: \(cols)")).font(RT.font(15, .bold))
+                        }
+                        preview
+                        RetroCheckbox(label: tr("首行作为标题行", "Header row"), isOn: $header)
+                        RetroCheckbox(label: tr("宽度占满整行", "Full width"), isOn: $full)
+                        RetroRadio(label: tr("边框", "Borders"),
+                                   options: [("1px solid #8c8c8c", tr("细线", "Thin")),
+                                             ("2px solid #000000", tr("粗线", "Thick")),
+                                             ("1px dashed #d0d0d0", tr("无", "None"))],
+                                   selection: $border, labelWidth: 60)
                     }
-                    Stepper(value: $cols, in: 1...12) {
-                        Text(tr("列数：\(cols)", "Columns: \(cols)")).font(RT.font(14, .bold))
-                    }
-                    preview
-                    RetroCheckbox(label: tr("首行作为标题行", "Header row"), isOn: $header)
-                    RetroCheckbox(label: tr("宽度占满整行", "Full width"), isOn: $full)
-                    RetroRadio(label: tr("边框", "Borders"),
-                               options: [("1px solid #8c8c8c", tr("细线", "Thin")),
-                                         ("2px solid #000000", tr("粗线", "Thick")),
-                                         ("1px dashed #d0d0d0", tr("无（虚线参考）", "None"))],
-                               selection: $border, labelWidth: 50)
                     HStack {
                         Spacer()
                         Button(tr("插入", "Insert")) {
@@ -784,9 +768,11 @@ struct FindSheet: View {
     var body: some View {
         RetroPanel(tr("查找和替换", "Find & Replace")) {
             VStack(alignment: .leading, spacing: 14) {
-                RetroField(label: tr("查找", "Find"), text: $find)
-                RetroField(label: tr("替换为", "Replace"), text: $replace)
-                RetroCheckbox(label: tr("区分大小写", "Match case"), isOn: $caseSensitive)
+                RetroGroup("") {
+                    RetroField(label: tr("查找", "Find"), text: $find)
+                    RetroField(label: tr("替换为", "Replace"), text: $replace)
+                    RetroCheckbox(label: tr("区分大小写", "Match case"), isOn: $caseSensitive)
+                }
                 HStack(spacing: 12) {
                     Button(tr("查找下一个", "Find Next")) {
                         Task {

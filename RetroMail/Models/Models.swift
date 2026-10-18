@@ -149,6 +149,10 @@ struct MessageSummary: Codable, Identifiable, Hashable {
     var messageId: String?
     var inReplyTo: String?
     var references: [String]
+    /// 列表里显示的正文预览（后台补取）
+    var preview: String?
+    var contentType: String?
+    var transferEncoding: String?
 
     var id: Int { uid }
 
@@ -189,6 +193,9 @@ extension MessageSummary {
         self.messageId = Threading.ids(h["Message-ID"]).first
         self.inReplyTo = Threading.ids(h["In-Reply-To"]).first
         self.references = Threading.ids(h["References"])
+        self.preview = nil
+        self.contentType = h["Content-Type"]
+        self.transferEncoding = h["Content-Transfer-Encoding"]
     }
 }
 
@@ -449,5 +456,13 @@ enum Fmt {
 
     static func size(_ bytes: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+}
+
+extension Fmt {
+    /// 工具栏状态文字：“已更新 13:01” / “Updated 1:01 PM”
+    static func updated(_ d: Date?) -> String {
+        guard let d = d else { return "" }
+        return tr("已更新 ", "Updated ") + short(d)
     }
 }

@@ -536,8 +536,8 @@ struct ParsedMessage {
     private static let css = """
     html { -webkit-text-size-adjust: 100%; }
     html, body { height: auto !important; min-height: 0 !important; }
-    body { margin: 12px; color: #000; background: #fff; font: 15px -apple-system, "PingFang SC", sans-serif; overflow-wrap: anywhere; word-wrap: break-word; }
-    body.plain pre { white-space: pre-wrap; margin: 0; font: 14px Menlo, "PingFang SC", monospace; line-height: 1.5; }
+    body { margin: 12px; color: #000; background: #fff; font: 16px Helvetica, "PingFang SC", sans-serif; overflow-wrap: anywhere; word-wrap: break-word; }
+    body.plain pre { white-space: pre-wrap; margin: 0; font: 16px Helvetica, "PingFang SC", sans-serif; line-height: 1.4; }
     body.plain a { color: #000; }
     img { max-width: 100% !important; height: auto !important; }
     blockquote { margin: 0 0 0 4px; padding-left: 8px; border-left: 2px solid #888; }
@@ -548,6 +548,63 @@ struct ParsedMessage {
       html.htmlmail img, html.htmlmail video, html.htmlmail picture, html.htmlmail [style*="background-image"] { filter: invert(1) hue-rotate(180deg); }
     }
     """
+}
+
+/// 从正文开头的一小段数据里提取预览文字（数据可能被截断）。
+enum PreviewText {
+    static func extract(_ data: Data, contentType: String?, transferEncoding: String?) -> String {
+        let ct = HeaderValue.parse(contentType)
+        var text = ""
+        if ct.value.hasPrefix("multipart/"), let b = ct.params["boundary"], !b.isEmpty {
+            text = firstText(in: MIMEPart.splitMultipart(data, boundary: b), depth: 0)
+        } else {
+            var part = MIMEPart(headers: MIMEHeaders(fields: [("Content-Transfer-Encoding", transferEncoding ?? "")]),
+                                body: data, contentType: ct, disposition: HeaderValue(value: "", params: [:]))
+            if part.contentType.value.isEmpty { part.contentType.value = "text/plain" }
+            text = render(part)
+        }
+        return clean(text)
+    }
+
+    private static func firstText(in parts: [Data], depth: Int) -> String {
+        guard depth < 6 else { return "" }
+        var html: MIMEPart?
+        for raw in parts {
+            let p = MIMEPart.parse(raw, depth: depth + 1)
+            let t = p.contentType.value
+            if t.hasPrefix("multipart/"), let b = p.contentType.params["boundary"] {
+                let inner = firstText(in: MIMEPart.splitMultipart(p.body, boundary: b), depth: depth + 1)
+                if !inner.isEmpty { return inner }
+            } else if t == "text/plain" && p.disposition.value != "attachment" {
+                return render(p)
+            } else if t == "text/html" && html == nil {
+                html = p
+            }
+        }
+        if let h = html { return render(h) }
+        return ""
+    }
+
+    private static func render(_ p: MIMEPart) -> String {
+        var data = p.decodedData
+        // 截断的 UTF-8 末尾可能是半个字符
+        for _ in 0..<3 {
+            if String(data: data, encoding: .utf8) != nil || data.isEmpty { break }
+            data.removeLast()
+        }
+        let s = Charset.decode(data, charset: p.contentType.params["charset"])
+        return p.contentType.value == "text/html" ? HTMLText.plain(s) : s
+    }
+
+    static func clean(_ s: String) -> String {
+        var t = s.replacingOccurrences(of: "\r\n", with: "\n")
+        t = QuoteStripper.strip(t).text
+        let lines = t.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix(">") }
+        let collapsed = lines.joined(separator: " ")
+            .replacingOccurrences(of: "\u{FFFD}", with: "")
+            .components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        return String(collapsed.prefix(200))
+    }
 }
 
 /// 识别并去掉回复邮件里引用的旧内容（各家客户端的分隔格式）。

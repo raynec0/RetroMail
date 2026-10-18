@@ -18,7 +18,10 @@ final class MessageListModel: ObservableObject {
     @Published var searching = false
     @Published var hasMore = false
     @Published var error: String?
-    private var loadingMore = false
+    /// 服务器上这个邮箱的邮件总数
+    @Published var total = 0
+    @Published private(set) var loadingMore = false
+    private var previewTask: Task<Void, Never>?
     private var didInitialLoad = false
 
     init(account: MailAccount, folder: MailFolder) {
@@ -50,9 +53,14 @@ final class MessageListModel: ObservableObject {
         defer { loading = false }
         let path = folder.path
         do {
-            let result = try await syncClient.perform { try await $0.fetchLatest(path, limit: 60) }
-            messages = result.messages.sorted(by: MessageSummary.newestFirst)
+            let (result, count) = try await syncClient.perform { c -> ((messages: [MessageSummary], hasMore: Bool), Int) in
+                let r = try await c.fetchLatest(path, limit: 60)
+                return (r, c.selectedExists)
+            }
+            messages = keepPreviews(result.messages).sorted(by: MessageSummary.newestFirst)
             hasMore = result.hasMore
+            total = count
+            loadPreviews()
             DiskCache.saveList(Array(messages.prefix(120)), account: account.id, folder: path)
             if folder.role == .inbox, let top = messages.map(\.uid).max() {
                 BackgroundRefresh.noteSeen(account: account.id, nextUID: top + 1)
@@ -79,9 +87,58 @@ final class MessageListModel: ObservableObject {
             let existing = Set(messages.map(\.uid))
             messages = (messages + result.messages.filter { !existing.contains($0.uid) }).sorted(by: MessageSummary.newestFirst)
             hasMore = result.hasMore
+            loadPreviews()
         } catch {
             self.error = error.localizedDescription
         }
+    }
+
+    /// 刷新后保留已经取到的预览。
+    private func keepPreviews(_ fresh: [MessageSummary]) -> [MessageSummary] {
+        var old: [Int: String] = [:]
+        for m in messages { if let p = m.preview { old[m.uid] = p } }
+        return fresh.map { m in
+            var x = m
+            if x.preview == nil { x.preview = old[m.uid] }
+            return x
+        }
+    }
+
+    /// 在后台连接上补取正文预览（每封只取前 1.5 KB），分批更新列表。
+    func loadPreviews() {
+        previewTask?.cancel()
+        let path = folder.path
+        let acc = account
+        previewTask = Task { [weak self] in
+            guard let self = self else { return }
+            let missing = self.messages.filter { $0.preview == nil }
+            let bg = MailCenter.shared.client(for: acc, .background)
+            for start in stride(from: 0, to: missing.count, by: 20) {
+                if Task.isCancelled { return }
+                let batch = Array(missing[start..<min(start + 20, missing.count)])
+                guard let raw = try? await bg.perform({ try await $0.fetchPreviews(path, uids: batch.map(\.uid)) }) else { return }
+                let info = Dictionary(uniqueKeysWithValues: batch.map { ($0.uid, ($0.contentType, $0.transferEncoding)) })
+                let texts = await Task.detached { () -> [Int: String] in
+                    var out: [Int: String] = [:]
+                    for (uid, data) in raw {
+                        let meta = info[uid]
+                        out[uid] = PreviewText.extract(data, contentType: meta?.0 ?? nil, transferEncoding: meta?.1 ?? nil)
+                    }
+                    return out
+                }.value
+                if Task.isCancelled { return }
+                var updated = self.messages
+                for i in updated.indices {
+                    if let t = texts[updated[i].uid] { updated[i].preview = t }
+                }
+                self.messages = updated
+            }
+            DiskCache.saveList(Array(self.messages.prefix(120)), account: acc.id, folder: path)
+        }
+    }
+
+    func stopPreviews() {
+        previewTask?.cancel()
     }
 
     func search() async {
@@ -176,7 +233,9 @@ struct MessageListView: View {
     @State private var selecting = false
     @State private var selection = Set<String>()
     @State private var showMove = false
+    @State private var showMark = false
     @State private var compose: ComposeRequest?
+    @State private var updatedAt: Date?
 
     init(account: MailAccount, folder: MailFolder) {
         self.account = account
@@ -186,33 +245,56 @@ struct MessageListView: View {
 
     private var showRecipients: Bool { folder.role == .sent || folder.role == .drafts }
 
+    private var unread: Int {
+        center.unread[center.unreadKey(account.id, folder.path)] ?? model.messages.filter { !$0.seen }.count
+    }
+
+    private var title: String {
+        unread > 0 ? "\(folder.displayName) (\(unread))" : folder.displayName
+    }
+
     var body: some View {
         let convs = model.conversations
-        RetroScreen(title: folder.displayName) {
-            VStack(spacing: 0) {
-                searchBar
-                RetroDivider()
-                infoBar(convs)
-                RetroDivider()
-                content(convs)
-                if selecting { selectionBar(convs) }
-            }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if !selecting {
-                SpringButton(symbol: "square.and.pencil", label: tr("新邮件", "Compose"), colors: .blue, size: 58, plate: true) {
-                    compose = ComposeRequest(account: account)
+        RetroScreen(title: title, back: tr("邮箱", "Mailboxes"), background: IOS3.cell) {
+            if selecting {
+                Button(tr("取消", "Cancel")) {
+                    selecting = false
+                    selection = []
                 }
-                .padding(18)
+                .buttonStyle(BarButtonStyle(kind: .done))
+            } else {
+                Button(tr("编辑", "Edit")) { selecting = true }
+                    .buttonStyle(BarButtonStyle())
+            }
+        } content: {
+            VStack(spacing: 0) {
+                IOS3SearchBar(text: $model.query,
+                              placeholder: tr("搜索", "Search"),
+                              busy: model.searching,
+                              onSubmit: { Task { await model.search() } },
+                              onCancel: { model.clearSearch() })
+                content(convs)
+                if selecting {
+                    editToolbar(convs)
+                } else {
+                    normalToolbar
+                }
             }
         }
         .retroAlert($model.error)
-        .task { await model.initialLoad() }
+        .task {
+            await model.initialLoad()
+            updatedAt = Date()
+        }
+        .onDisappear { model.stopPreviews() }
         .onChange(of: settings.threaded) { _ in model.regroup() }
         .navigationDestination(isPresented: Binding(get: { openConversation != nil },
                                                     set: { if !$0 { openConversation = nil } })) {
             if let c = openConversation {
-                ConversationView(list: model, conversation: c)
+                ConversationView(list: model, conversation: c,
+                                 position: position(of: c, in: convs),
+                                 onStep: { step($0, from: c) })
+                    .id(c.id)
             }
         }
         .sheet(isPresented: $showMove) {
@@ -224,6 +306,7 @@ struct MessageListView: View {
             }
             .preferredColorScheme(settings.colorScheme)
         }
+        .ios3ActionSheet(isPresented: $showMark, actions: markActions(convs))
         .fullScreenCover(item: $compose) {
             ComposeView(request: $0)
                 .environmentObject(settings)
@@ -231,67 +314,24 @@ struct MessageListView: View {
         }
     }
 
+    // MARK: 上一封 / 下一封
+
+    private func position(of c: Conversation, in convs: [Conversation]) -> (index: Int, count: Int) {
+        ((convs.firstIndex { $0.id == c.id } ?? 0), convs.count)
+    }
+
+    private func step(_ delta: Int, from c: Conversation) {
+        let convs = model.conversations
+        guard let i = convs.firstIndex(where: { $0.id == c.id }) else { return }
+        let j = i + delta
+        guard convs.indices.contains(j) else { return }
+        openConversation = convs[j]
+    }
+
+    // MARK: 列表
+
     private func selectedUIDs(_ convs: [Conversation]) -> [Int] {
         convs.filter { selection.contains($0.id) }.flatMap(\.uids)
-    }
-
-    private var searchBar: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").font(.system(size: 13, weight: .bold))
-                TextField(tr("搜索主题 / 发件人 / 收件人", "Search subject / from / to"), text: $model.query)
-                    .font(RT.font(13))
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.search)
-                    .onSubmit { Task { await model.search() } }
-                if model.searching {
-                    Image(systemName: "hourglass").font(.system(size: 12))
-                }
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 6)
-            .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
-            .background(Rectangle().fill(Color.ink).offset(x: 1.5, y: 1.5))
-
-            if model.searchResults != nil || !model.query.isEmpty {
-                Button(tr("取消", "Cancel")) { model.clearSearch() }
-                    .buttonStyle(RetroButtonStyle(compact: true))
-            }
-            Button(selecting ? tr("完成", "Done") : tr("选择", "Select")) {
-                selecting.toggle()
-                selection = []
-            }
-            .buttonStyle(RetroButtonStyle(compact: true))
-        }
-        .foregroundColor(.ink)
-        .padding(10)
-    }
-
-    private func infoBar(_ convs: [Conversation]) -> some View {
-        let unread = center.unread[center.unreadKey(account.id, folder.path)] ?? model.messages.filter { !$0.seen }.count
-        let label: String
-        if let r = model.searchResults {
-            label = tr("找到 \(r.count) 封", "\(r.count) found")
-        } else if selecting {
-            label = tr("已选择 \(selection.count) 项", "\(selection.count) selected")
-        } else if settings.threaded {
-            label = tr("\(convs.count) 个会话 · \(model.messages.count)\(model.hasMore ? "+" : "") 封", "\(convs.count) threads · \(model.messages.count)\(model.hasMore ? "+" : "") msgs")
-        } else {
-            label = tr("\(model.messages.count)\(model.hasMore ? "+" : "") 封邮件", "\(model.messages.count)\(model.hasMore ? "+" : "") messages")
-        }
-        return HStack {
-            Text(label)
-            Spacer()
-            if model.loading {
-                Image(systemName: "hourglass")
-            }
-            Text(tr("\(unread) 封未读", "\(unread) unread"))
-        }
-        .font(RT.font(11))
-        .foregroundColor(.ink)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
     }
 
     @ViewBuilder
@@ -300,104 +340,148 @@ struct MessageListView: View {
             VStack(spacing: 10) {
                 Spacer()
                 if model.loading || model.searching {
-                    RetroBusy(text: tr("正在接收…", "Receiving…"))
+                    RetroBusy(text: tr("正在检查邮件…", "Checking for Mail…"))
                 } else {
-                    Text(model.searchResults != nil ? tr("没有找到匹配的邮件", "No matching messages") : tr("此邮箱中没有邮件", "No messages"))
-                        .font(RT.font(13))
-                    Button(tr("刷新", "Refresh")) { Task { await model.refresh() } }
-                        .buttonStyle(RetroButtonStyle(compact: true))
+                    Text(model.searchResults != nil ? tr("没有结果", "No Results") : tr("没有邮件", "No Mail"))
+                        .font(RT.font(20, .bold))
+                        .foregroundColor(IOS3.secondary)
                 }
                 Spacer()
             }
-            .foregroundColor(.ink)
             .frame(maxWidth: .infinity)
+            .background(IOS3.cell)
         } else {
             List {
                 ForEach(convs) { c in
                     row(c)
                 }
-                if model.hasMore && model.searchResults == nil {
-                    HStack {
-                        Spacer()
-                        RetroBusy(text: tr("载入更早的邮件…", "Loading older…"))
-                        Spacer()
-                    }
-                    .padding(.vertical, 14)
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.paper)
-                    .onAppear { Task { await model.loadMore() } }
+                if model.searchResults == nil {
+                    loadMoreRow
                 }
-                Color.clear.frame(height: 80)
-                    .listRowBackground(Color.paper)
-                    .listRowSeparator(.hidden)
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
-            .background(Color.paper)
-            .refreshable { await model.refresh() }
+            .background(IOS3.cell)
+            .environment(\.defaultMinListRowHeight, 1)
+            .refreshable {
+                await model.refresh()
+                updatedAt = Date()
+            }
         }
     }
 
     private func row(_ c: Conversation) -> some View {
         let isSelected = selection.contains(c.id)
         let unread = c.unread > 0
-        return ConversationRow(conversation: c, selecting: selecting, selected: isSelected,
-                               showRecipients: showRecipients, threaded: settings.threaded)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if selecting {
-                    if isSelected { selection.remove(c.id) } else { selection.insert(c.id) }
-                } else {
-                    openConversation = c
-                }
+        return Button {
+            if selecting {
+                if isSelected { selection.remove(c.id) } else { selection.insert(c.id) }
+            } else {
+                openConversation = c
             }
-            .listRowInsets(EdgeInsets())
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.paper)
-            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                Button(role: .destructive) {
-                    Task { await model.delete(c.uids) }
-                } label: {
-                    Label(tr("删除", "Delete"), systemImage: "trash")
-                }
-                Button {
-                    Task { await model.setFlagged(c.uids, !c.flagged) }
-                } label: {
-                    Label(c.flagged ? tr("取消旗标", "Unflag") : tr("旗标", "Flag"), systemImage: "flag")
-                }
-                .tint(.gray)
+        } label: {
+            ConversationRow(conversation: c, selecting: selecting, selected: isSelected,
+                            showRecipients: showRecipients, threaded: settings.threaded)
+        }
+        .buttonStyle(InvertOnPressStyle())
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+        .listRowBackground(IOS3.cell)
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button(role: .destructive) {
+                Task { await model.delete(c.uids) }
+            } label: {
+                Text(tr("删除", "Delete"))
             }
-            .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                Button {
-                    Task { await model.setSeen(c.uids, unread) }
-                } label: {
-                    Label(unread ? tr("已读", "Read") : tr("未读", "Unread"), systemImage: unread ? "envelope.open" : "envelope.badge")
-                }
-                .tint(.black)
+            .tint(HexColor.color("#D23426"))
+        }
+        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+            Button {
+                Task { await model.setSeen(c.uids, unread) }
+            } label: {
+                Text(unread ? tr("标为已读", "Mark Read") : tr("标为未读", "Mark Unread"))
             }
+            .tint(HexColor.color("#2A63DD"))
+        }
     }
 
-    private func selectionBar(_ convs: [Conversation]) -> some View {
-        let uids = selectedUIDs(convs)
-        return VStack(spacing: 0) {
-            RetroDivider()
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    SpringButton(symbol: "checklist", label: tr("全选", "All"), colors: .indigo, size: 40) {
-                        selection = Set(convs.map(\.id))
-                    }
-                    SpringButton(symbol: "envelope.open.fill", label: tr("已读", "Read"), colors: .teal, size: 40) { finish { await model.setSeen(uids, true) } }
-                    SpringButton(symbol: "envelope.badge.fill", label: tr("未读", "Unread"), colors: .orange, size: 40) { finish { await model.setSeen(uids, false) } }
-                    SpringButton(symbol: "flag.fill", label: tr("旗标", "Flag"), colors: .red, size: 40) { finish { await model.setFlagged(uids, true) } }
-                    SpringButton(symbol: "folder.fill", label: tr("移动", "Move"), colors: .brown, size: 40) { if !selection.isEmpty { showMove = true } }
-                    SpringButton(symbol: "trash.fill", label: tr("删除", "Delete"), colors: .gray, size: 40) { finish { await model.delete(uids) } }
+    /// iPhone OS 3 列表底部的“载入更多邮件”。
+    private var loadMoreRow: some View {
+        Button {
+            Task { await model.loadMore() }
+        } label: {
+            VStack(spacing: 3) {
+                if model.loadingMore {
+                    RetroBusy(text: tr("正在载入…", "Loading…"))
+                } else if model.hasMore {
+                    Text(tr("载入更多邮件", "Load More Messages"))
+                        .font(RT.font(16, .bold))
+                        .foregroundColor(IOS3.dateBlue)
                 }
-                .padding(10)
-                .padding(.trailing, 4)
+                Text(tr("共 \(max(model.total, model.messages.count)) 封邮件，\(unread) 封未读",
+                        "\(max(model.total, model.messages.count)) messages total, \(unread) unread"))
+                    .font(RT.font(13))
+                    .foregroundColor(IOS3.secondary)
             }
+            .frame(maxWidth: .infinity, minHeight: 64)
+            .contentShape(Rectangle())
         }
-        .background(Color.paper)
+        .buttonStyle(.plain)
+        .disabled(!model.hasMore || model.loadingMore)
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+        .listRowBackground(IOS3.cell)
+    }
+
+    // MARK: 工具栏
+
+    private var normalToolbar: some View {
+        IOS3Toolbar {
+            ToolbarIcon(symbol: "arrow.clockwise", label: tr("刷新", "Refresh")) {
+                Task {
+                    await model.refresh()
+                    updatedAt = Date()
+                }
+            }
+            .frame(width: 54)
+            ToolbarStatus(text: model.loading ? tr("正在检查邮件…", "Checking for Mail…") : Fmt.updated(updatedAt))
+            ToolbarIcon(symbol: "square.and.pencil", label: tr("新邮件", "Compose")) {
+                compose = ComposeRequest(account: account)
+            }
+            .frame(width: 54)
+        }
+    }
+
+    private func editToolbar(_ convs: [Conversation]) -> some View {
+        let uids = selectedUIDs(convs)
+        let n = selection.isEmpty ? "" : " (\(selection.count))"
+        return IOS3Toolbar {
+            HStack(spacing: 8) {
+                Button(tr("删除", "Delete") + n) { finish { await model.delete(uids) } }
+                    .buttonStyle(BarButtonStyle(kind: .red))
+                    .frame(maxWidth: .infinity)
+                    .disabled(selection.isEmpty)
+                Button(tr("移动", "Move") + n) { showMove = true }
+                    .buttonStyle(BarButtonStyle())
+                    .frame(maxWidth: .infinity)
+                    .disabled(selection.isEmpty)
+                Button(tr("标记", "Mark") + n) { showMark = true }
+                    .buttonStyle(BarButtonStyle())
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(.horizontal, 4)
+        }
+    }
+
+    private func markActions(_ convs: [Conversation]) -> [SheetAction] {
+        let uids = selectedUIDs(convs)
+        return [
+            SheetAction(tr("全选", "Select All")) { selection = Set(convs.map(\.id)) },
+            SheetAction(tr("标为已读", "Mark as Read")) { finish { await model.setSeen(uids, true) } },
+            SheetAction(tr("标为未读", "Mark as Unread")) { finish { await model.setSeen(uids, false) } },
+            SheetAction(tr("加旗标", "Flag")) { finish { await model.setFlagged(uids, true) } },
+            SheetAction(tr("取消旗标", "Unflag")) { finish { await model.setFlagged(uids, false) } },
+        ]
     }
 
     private func finish(_ op: @escaping () async -> Void) {
@@ -408,83 +492,108 @@ struct MessageListView: View {
     }
 }
 
+/// iPhone OS 3 邮件列表的一行：蓝点、发件人、蓝色日期、主题、两行灰色预览。
 struct ConversationRow: View {
     let conversation: Conversation
     var selecting: Bool
     var selected: Bool
     var showRecipients: Bool
     var threaded: Bool
+    @Environment(\.rowPressed) private var pressed
 
     private var people: String {
         let m = conversation.latest
         if showRecipients {
             let names = m.to.map(\.display).joined(separator: ", ")
-            return names.isEmpty ? tr("（无收件人）", "(No recipients)") : tr("致：", "To: ") + names
+            return names.isEmpty ? tr("（无收件人）", "(No Recipients)") : names
         }
         if threaded && conversation.count > 1 {
             var seen = Set<String>()
             let names = conversation.messages.compactMap { $0.from?.display }.filter { seen.insert($0).inserted }
             return names.prefix(3).joined(separator: ", ")
         }
-        return m.from?.display ?? tr("（未知发件人）", "(Unknown sender)")
+        return m.from?.display ?? tr("（未知发件人）", "(Unknown Sender)")
     }
 
     var body: some View {
         let m = conversation.latest
         let unread = conversation.unread > 0
-        HStack(alignment: .top, spacing: 8) {
+        let gray = pressed ? Color.white : IOS3.secondary
+        HStack(alignment: .top, spacing: 0) {
             if selecting {
                 ZStack {
-                    Rectangle().fill(Color.paper)
-                    Rectangle().stroke(Color.ink, lineWidth: 1)
                     if selected {
-                        Image(systemName: "checkmark").font(.system(size: 10, weight: .heavy))
+                        Circle().fill(LinearGradient(colors: [HexColor.color("#F47A6E"), HexColor.color("#C9190B")], startPoint: .top, endPoint: .bottom))
+                        Image(systemName: "checkmark").font(.system(size: 12, weight: .heavy)).foregroundColor(.white)
+                    } else {
+                        Circle().stroke(HexColor.color("#B8B8B8"), lineWidth: 1.5)
                     }
                 }
-                .frame(width: 16, height: 16)
-                .padding(.top, 2)
+                .frame(width: 26, height: 26)
+                .padding(.leading, 8)
+                .padding(.top, 22)
             }
-            Text(unread ? "◆" : " ")
-                .font(RT.font(11, .bold))
-                .frame(width: 10)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
+            VStack(spacing: 6) {
+                if unread {
+                    UnreadDot()
+                } else if conversation.answered {
+                    Image(systemName: "arrowshape.turn.up.left.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(gray)
+                } else {
+                    Color.clear.frame(width: 12, height: 12)
+                }
+                if conversation.flagged {
+                    Image(systemName: "flag.fill").font(.system(size: 10)).foregroundColor(pressed ? .white : HexColor.color("#E8740C"))
+                }
+            }
+            .frame(width: 28)
+            .padding(.top, 9)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
                     Text(people)
-                        .font(RT.font(14, unread ? .bold : .regular))
+                        .font(RT.font(17, .bold))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if conversation.hasAttachment {
+                        Image(systemName: "paperclip").font(.system(size: 12)).foregroundColor(gray)
+                    }
+                    Text(Fmt.short(m.received))
+                        .font(RT.font(14))
+                        .foregroundColor(pressed ? .white : IOS3.dateBlue)
+                    Chevron()
+                }
+                HStack(spacing: 5) {
+                    Text(m.subject.isEmpty ? tr("（无主题）", "(No Subject)") : m.subject)
+                        .font(RT.font(14))
                         .lineLimit(1)
                     if threaded && conversation.count > 1 {
                         Text("\(conversation.count)")
-                            .font(RT.font(10, .bold))
-                            .padding(.horizontal, 4)
-                            .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
+                            .font(RT.font(12, .bold))
+                            .foregroundColor(pressed ? IOS3.dateBlue : .white)
+                            .padding(.horizontal, 6)
+                            .background(Capsule().fill(pressed ? Color.white : IOS3.pill))
                     }
-                    Spacer(minLength: 4)
-                    if conversation.answered {
-                        Image(systemName: "arrowshape.turn.up.left").font(.system(size: 10))
-                    }
-                    if conversation.hasAttachment {
-                        Image(systemName: "paperclip").font(.system(size: 11))
-                    }
-                    if conversation.flagged {
-                        Image(systemName: "flag.fill").font(.system(size: 11))
-                    }
-                    Text(Fmt.short(m.received))
-                        .font(RT.font(11))
                 }
-                Text(m.subject.isEmpty ? tr("（无主题）", "(No subject)") : m.subject)
-                    .font(RT.font(13, unread ? .semibold : .regular))
+                Text(m.preview ?? " ")
+                    .font(RT.font(14))
+                    .foregroundColor(gray)
                     .lineLimit(2)
+                    .frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
             }
+            .padding(.trailing, 8)
+            .padding(.vertical, 6)
         }
-        .foregroundColor(.ink)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
-        .background(selected ? Color.shade : Color.paper)
-        .overlay(alignment: .bottom) { RetroDivider(dotted: true) }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .background(selected && !pressed ? HexColor.color("#E3EBF7") : Color.clear)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(pressed ? Color.clear : IOS3.separator).frame(height: 1)
+        }
     }
 }
 
+/// “移动到新邮箱”页面。
 struct FolderPickerView: View {
     let account: MailAccount
     let excluding: String
@@ -493,31 +602,28 @@ struct FolderPickerView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        RetroPanel(tr("移动到…", "Move to…")) {
-            List {
-                ForEach((center.folders[account.id] ?? []).filter { $0.selectable && $0.path != excluding }) { f in
-                    Button {
-                        onPick(f)
-                        dismiss()
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: f.role.icon).frame(width: 22)
-                            Text(f.displayName).font(RT.font(15))
-                            Spacer()
+        VStack(spacing: 0) {
+            IOS3NavBar(title: tr("移到新邮箱", "Move to Mailbox")) {
+                EmptyView()
+            } trailing: {
+                Button(tr("取消", "Cancel")) { dismiss() }
+                    .buttonStyle(BarButtonStyle())
+            }
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach((center.folders[account.id] ?? []).filter { $0.selectable && $0.path != excluding }) { f in
+                        Button {
+                            onPick(f)
+                            dismiss()
+                        } label: {
+                            FolderRowLabel(folder: f, count: 0)
                         }
-                        .padding(.leading, 12 + CGFloat(f.depth) * 18)
-                        .padding(.vertical, 11)
-                        .contentShape(Rectangle())
+                        .buttonStyle(InvertOnPressStyle())
                     }
-                    .buttonStyle(InvertOnPressStyle())
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.paper)
                 }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
         }
-        .retroSheetStyle()
+        .background(IOS3.cell.ignoresSafeArea())
+        .presentationDetents([.large])
     }
 }

@@ -11,6 +11,8 @@ final class MailCenter: ObservableObject {
     @Published var unread: [String: Int] = [:]
     @Published var folderErrors: [UUID: String] = [:]
     @Published var loadingAccounts: Set<UUID> = []
+    /// 上次检查邮件的时间（工具栏显示“已更新 …”）
+    @Published var lastUpdated: Date?
 
     /// 每个账户三条独立连接，互不排队：
     /// - interactive：打开邮件、标记、移动、删除（用户正在等的操作）
@@ -60,6 +62,7 @@ final class MailCenter: ObservableObject {
                 group.addTask { await self.loadFolders(a) }
             }
         }
+        lastUpdated = Date()
     }
 
     func loadFolders(_ a: MailAccount) async {
