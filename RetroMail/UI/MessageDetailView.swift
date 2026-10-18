@@ -108,6 +108,7 @@ struct AutoHeightHTMLView: UIViewRepresentable {
         context.coordinator.onMailto = onMailto
         if context.coordinator.lastHTML != html {
             context.coordinator.lastHTML = html
+            context.coordinator.jsHeight = false
             wv.loadHTMLString(html, baseURL: nil)
         }
     }
@@ -121,6 +122,7 @@ struct AutoHeightHTMLView: UIViewRepresentable {
         var parent: AutoHeightHTMLView
         var lastHTML: String?
         var observation: NSKeyValueObservation?
+        var jsHeight = false
 
         init(_ parent: AutoHeightHTMLView) {
             self.parent = parent
@@ -140,7 +142,7 @@ struct AutoHeightHTMLView: UIViewRepresentable {
                 let h = ceil(sv.contentSize.height)
                 DispatchQueue.main.async {
                     guard let self = self else { return }
-                    if h > 0, abs(self.parent.height - h) > 1 {
+                    if !self.jsHeight, h > 0, abs(self.parent.height - h) > 1 {
                         self.parent.height = h
                     }
                 }
@@ -150,7 +152,16 @@ struct AutoHeightHTMLView: UIViewRepresentable {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard let body = message.body as? [String: Any] else { return }
             if let z = (body["z"] as? NSNumber)?.doubleValue {
-                DispatchQueue.main.async { [weak self] in self?.parent.onScaled?(z) }
+                let h = (body["h"] as? NSNumber).map { CGFloat($0.doubleValue) }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.parent.onScaled?(z)
+                    // 页面自己量出的高度最准确（WKWebView 的 contentSize 不会比视图本身矮，缩小后会留空白）
+                    if let h = h, h > 0 {
+                        self.jsHeight = true
+                        if abs(self.parent.height - h) > 1 { self.parent.height = h }
+                    }
+                }
                 return
             }
             let found = (body["q"] as? Bool) ?? false
@@ -200,23 +211,58 @@ struct AutoHeightHTMLView: UIViewRepresentable {
             target.style.display = 'none';
             return true;
           }
-          function fit(){
-            try {
-              document.body.style.zoom = 1;
-              var w = document.documentElement.clientWidth;
-              var sw = document.documentElement.scrollWidth;
-              var z = 1;
-              if (sw > w + 4) { z = w / sw; document.body.style.zoom = z.toFixed(3); }
-              window.webkit.messageHandlers.retro.postMessage({ z: z });
-            } catch (e) {}
+          var wrap = null;
+          var fitting = false;
+          function ensureWrap(){
+            if (wrap) return wrap;
+            wrap = document.createElement('div');
+            wrap.id = 'rm-fit';
+            while (document.body.firstChild) { wrap.appendChild(document.body.firstChild); }
+            document.body.appendChild(wrap);
+            wrap.style.transformOrigin = '0 0';
+            return wrap;
           }
+          function fit(){
+            if (fitting) return;
+            fitting = true;
+            try {
+              var b = document.body, el = ensureWrap();
+              el.style.transform = 'none';
+              el.style.width = 'auto';
+              b.style.removeProperty('height');
+              b.style.overflow = 'visible';
+              var w = el.clientWidth || document.documentElement.clientWidth;
+              var sw = Math.max(el.scrollWidth, document.documentElement.scrollWidth - 1);
+              var z = 1;
+              if (sw > w + 4) {
+                z = w / sw;
+                el.style.width = sw + 'px';
+                el.style.transform = 'scale(' + z.toFixed(4) + ')';
+              }
+              var r = el.getBoundingClientRect();
+              var cs = getComputedStyle(b);
+              var h = r.height;
+              if (z < 1) {
+                b.style.setProperty('height', Math.ceil(h) + 'px', 'important');
+                b.style.overflow = 'hidden';
+                document.documentElement.style.overflowX = 'hidden';
+              }
+              var total = r.top + (window.scrollY || 0) + h + (parseFloat(cs.marginBottom) || 0) + (parseFloat(cs.paddingBottom) || 0);
+              window.webkit.messageHandlers.retro.postMessage({ z: z, h: Math.ceil(total) });
+            } catch (e) {}
+            fitting = false;
+          }
+          var pending = null;
+          function refit(){ if (pending) clearTimeout(pending); pending = setTimeout(function(){ pending = null; fit(); }, 60); }
           var found = false;
           try { if (HIDE) { found = hideQuotes(); } } catch (e) {}
           fit();
           try { window.webkit.messageHandlers.retro.postMessage({ q: found }); } catch (e) {}
-          window.addEventListener('load', fit);
+          window.addEventListener('load', refit);
+          window.addEventListener('resize', refit);
           var imgs = document.images;
-          for (var i = 0; i < imgs.length; i++) { imgs[i].addEventListener('load', fit); }
+          for (var i = 0; i < imgs.length; i++) { imgs[i].addEventListener('load', refit); imgs[i].addEventListener('error', refit); }
+          try { if (window.ResizeObserver && wrap) { new ResizeObserver(refit).observe(wrap); } } catch (e) {}
         })();
         """
     }

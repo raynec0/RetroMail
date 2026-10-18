@@ -56,6 +56,7 @@ struct ComposeView: View {
     @State private var error: String?
     @State private var confirmClose = false
     @State private var ribbonSheet: RibbonSheet?
+    @State private var lastSignatureAccount: UUID?
     @State private var prepared = false
 
     private var account: MailAccount? {
@@ -114,6 +115,7 @@ struct ComposeView: View {
         .busyOverlay(busy != nil, busy ?? "")
         .retroAlert($error)
         .sheetHost()
+        .onChange(of: accountId) { accountChanged($0) }
         .onChange(of: ed.focused) { f in
             if f { fieldsExpanded = false }
         }
@@ -279,10 +281,20 @@ struct ComposeView: View {
 
     // MARK: 预填内容
 
+    /// 带外层容器的签名 HTML（容器 class="re-sig"，切换发件账户时可以整体替换）。
     private func signatureHTML(_ a: MailAccount?) -> String {
-        guard let sig = a?.signature, !sig.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
-        let body = HTMLText.escape(sig).replacingOccurrences(of: "\n", with: "<br>")
-        return "<div class=\"re-sig\"><div><br></div><div>--&nbsp;<br>\(body)</div></div>"
+        guard let body = a?.signatureBodyHTML, !body.isEmpty else { return "" }
+        return "<div class=\"re-sig\"><div><br></div>" + body + "</div>"
+    }
+
+    /// 按“新邮件 / 回复转发”的设置决定是否自动加签名。
+    private func autoSignature(_ a: MailAccount?) -> String {
+        guard let a = a else { return "" }
+        switch request.mode {
+        case .new: return a.signatureOnNew == false ? "" : signatureHTML(a)
+        case .reply, .replyAll, .forward: return a.signatureOnReply == false ? "" : signatureHTML(a)
+        case .draft: return ""
+        }
     }
 
     private func quoteHeader(_ o: ParsedMessage, forward: Bool) -> String {
@@ -303,16 +315,19 @@ struct ComposeView: View {
     private func prepare() {
         guard !prepared else { return }
         prepared = true
-        accountId = request.account?.id ?? store.accounts.first?.id
+        // 直接用本地变量：刚写入的 @State 在同一次调用里不一定能读到新值
+        let acct = request.account.flatMap { r in store.accounts.first { $0.id == r.id } } ?? store.accounts.first
+        accountId = acct?.id
+        lastSignatureAccount = acct?.id
         to = request.to
-        let sig = signatureHTML(account)
+        let sig = autoSignature(acct)
         let draft = request.aiDraft.map { AIText.toHTML($0) } ?? ""
 
         guard let o = request.original else {
             ed.setInitialHTML(draft.isEmpty ? (sig.isEmpty ? "" : "<div><br></div>" + sig) : draft + sig)
             return
         }
-        let me = account?.email ?? ""
+        let me = acct?.email ?? ""
 
         switch request.mode {
         case .reply, .replyAll:
@@ -349,12 +364,20 @@ struct ComposeView: View {
     }
 
     private func insertSignature() {
-        let sig = signatureHTML(account)
-        if sig.isEmpty {
-            error = tr("还没有设置签名。请到“账户设置”里填写。", "No signature yet. Add one in Account Settings.")
-        } else {
-            ed.call("insertHTML", sig)
+        guard let body = account?.signatureBodyHTML, !body.isEmpty else {
+            error = tr("还没有设置签名。请到“设置 > 账户 > 签名”里编辑。", "No signature yet. Edit it in Settings > Account > Signature.")
+            return
         }
+        ed.call("setSignature", body)
+    }
+
+    /// 换了发件账户：把正文里的签名换成新账户的。
+    private func accountChanged(_ id: UUID?) {
+        guard prepared, id != lastSignatureAccount else { return }
+        lastSignatureAccount = id
+        let a = store.accounts.first { $0.id == id }
+        let body = autoSignature(a).isEmpty ? "" : (a?.signatureBodyHTML ?? "")
+        ed.call("setSignature", body)
     }
 
     private func unique(_ list: [MailAddress]) -> [MailAddress] {

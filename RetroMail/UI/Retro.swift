@@ -75,6 +75,14 @@ enum IOS3 {
     static let dateBlue = dyn("#2470D8", "#5E9BF2")
     static let chevron = dyn("#A3A3A3", "#5A5A5E")
     static let pill = dyn("#8C99AB", "#4F5A6B")
+    // 会话卡片
+    static let cardBandTop = dyn("#FBFCFE", "#3A3D44")
+    static let cardBandBottom = dyn("#DCE3EC", "#26282D")
+    static let cardBandOpenTop = dyn("#E8F0FB", "#33415A")
+    static let cardBandOpenBottom = dyn("#BFD0E8", "#232C3C")
+    static let cardBorder = dyn("#9AA4B1", "#000000")
+    static let cardInnerLine = dyn("#FFFFFF", "#4A4D55")
+    static let cardStrip = dyn("#EEF1F5", "#232427")
     static let selectStops: [Gradient.Stop] = [
         .init(color: HexColor.color("#058CF5"), location: 0),
         .init(color: HexColor.color("#015EE6"), location: 1),

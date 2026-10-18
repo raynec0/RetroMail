@@ -251,7 +251,7 @@ struct ConversationView: View {
             VStack(spacing: 0) {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        VStack(spacing: 0) {
+                        VStack(spacing: 10) {
                             threadHeader
                             ForEach(rows) { row in
                                 switch row {
@@ -262,9 +262,11 @@ struct ConversationView: View {
                                 }
                             }
                         }
+                        .padding(.horizontal, 8)
+                        .padding(.top, 10)
                         .padding(.bottom, 24)
                     }
-                    .background(IOS3.cell)
+                    .background(PinstripeBackground())
                     .onAppear {
                         if model.items.count > 1, let last = model.items.last?.id {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -330,30 +332,53 @@ struct ConversationView: View {
         }
     }
 
-    /// 会话标题：主题 + 封数 + 参与人
+    /// 会话标题：主题 + 封数 + 参与人 + 全部展开/折叠
     @ViewBuilder
     private var threadHeader: some View {
         if model.items.count > 1 {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(model.subject)
                     .font(RT.font(17, .bold))
+                    .foregroundColor(IOS3.groupHeader)
+                    .shadow(color: IOS3.groupHeaderShadow, radius: 0, x: 0, y: 1)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                 HStack(spacing: 6) {
                     Text(tr("\(model.items.count) 封邮件", "\(model.items.count) messages") + participants)
                         .lineLimit(1)
+                        .foregroundColor(IOS3.groupHeader)
                     if model.loadingRelated {
                         ProgressView().scaleEffect(0.6)
                     }
+                    Spacer(minLength: 4)
+                    Button(allExpanded ? tr("全部折叠", "Collapse All") : tr("全部展开", "Expand All")) {
+                        withAnimation(.easeOut(duration: 0.18)) { toggleAll() }
+                    }
+                    .buttonStyle(RetroButtonStyle(compact: true))
+                    .fixedSize()
                 }
                 .font(RT.font(12))
-                .foregroundColor(IOS3.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .bottom) { RetroDivider() }
+        }
+    }
+
+    private var allExpanded: Bool {
+        !model.items.isEmpty && model.items.allSatisfy { model.expanded.contains($0.id) }
+    }
+
+    private func toggleAll() {
+        if allExpanded {
+            // 只保留最新一封展开
+            model.expanded = Set(model.items.last.map { [$0.id] } ?? [String]())
+        } else {
+            model.showAll = true
+            for it in model.items {
+                model.expanded.insert(it.id)
+                Task { await model.fetch(it.id) }
+            }
         }
     }
 
@@ -363,31 +388,33 @@ struct ConversationView: View {
         return names.isEmpty ? "" : " · " + names.prefix(4).joined(separator: ", ")
     }
 
+    /// “另外 N 封邮件”：叠起来的卡片样子，点按展开。
     private func moreRow(_ n: Int) -> some View {
         Button {
-            withAnimation(.easeOut(duration: 0.15)) { model.showAll = true }
+            withAnimation(.easeOut(duration: 0.18)) { model.showAll = true }
         } label: {
-            HStack {
-                Spacer()
-                Text(tr("另外 \(n) 封邮件", "\(n) more messages"))
-                    .font(RT.font(14, .bold))
-                    .foregroundColor(IOS3.dateBlue)
-                Spacer()
-            }
-            .frame(minHeight: 34)
-            .background(
-                ZStack {
-                    VStack(spacing: 3) {
-                        RetroDivider()
-                        RetroDivider()
-                    }
-                    .padding(.horizontal, 30)
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(IOS3.cardBandBottom)
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(IOS3.cardBorder, lineWidth: 1))
+                    .padding(.horizontal, 14)
+                    .offset(y: 5)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(LinearGradient(colors: [IOS3.cardBandTop, IOS3.cardBandBottom], startPoint: .top, endPoint: .bottom))
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(IOS3.cardBorder, lineWidth: 1))
+                    .padding(.horizontal, 6)
+                HStack(spacing: 6) {
+                    Image(systemName: "rectangle.stack").font(.system(size: 13, weight: .semibold))
+                    Text(tr("另外 \(n) 封邮件", "\(n) more messages"))
+                        .font(RT.font(14, .bold))
                 }
-            )
+                .foregroundColor(IOS3.dateBlue)
+            }
+            .frame(height: 36)
+            .padding(.bottom, 5)
             .contentShape(Rectangle())
         }
-        .buttonStyle(InvertOnPressStyle())
-        .overlay(alignment: .bottom) { RetroDivider() }
+        .buttonStyle(CardBandPressStyle())
     }
 
     private func card(_ item: ThreadItem) -> some View {
@@ -397,6 +424,7 @@ struct ConversationView: View {
             account: model.account,
             isLatest: item.id == model.items.last?.id,
             single: model.items.count == 1,
+            isDraft: isDraft,
             loading: model.inFlight.contains(item.id),
             expanded: Binding(
                 get: { model.expanded.contains(item.id) },
@@ -405,13 +433,8 @@ struct ConversationView: View {
                     if on { Task { await model.fetch(item.id) } }
                 }),
             folderBadge: item.folder == model.currentFolder ? nil : model.folderName(item.folder),
+            onCompose: { mode in startCompose(mode, item: item) },
             onActions: { cardActionsFor = item },
-            onMarkUnread: {
-                Task {
-                    await model.list.setSeen([item.summary.uid], false)
-                    dismiss()
-                }
-            },
             onInvite: { invite = $0 },
             onZoom: { fullscreen = item },
             onMailto: { addr in compose = ComposeRequest(account: model.account, to: addr) }
@@ -436,6 +459,14 @@ struct ConversationView: View {
         }
         if let it = item {
             list.append(SheetAction(tr("全屏查看", "View Full Screen")) { fullscreen = it })
+            if it.folder == model.currentFolder {
+                list.append(SheetAction(tr("标为未读", "Mark as Unread")) {
+                    Task {
+                        await model.list.setSeen([it.summary.uid], false)
+                        dismiss()
+                    }
+                })
+            }
             list.append(SheetAction(tr("删除这封邮件", "Delete This Message"), role: .destructive) {
                 Task { await model.delete(it) }
             })
@@ -490,11 +521,12 @@ struct MessageCard: View {
     let account: MailAccount
     let isLatest: Bool
     let single: Bool
+    let isDraft: Bool
     let loading: Bool
     @Binding var expanded: Bool
     let folderBadge: String?
+    let onCompose: (ComposeRequest.Mode) -> Void
     let onActions: () -> Void
-    let onMarkUnread: () -> Void
     let onInvite: (MailAttachment) -> Void
     let onZoom: () -> Void
     let onMailto: (String) -> Void
@@ -509,39 +541,145 @@ struct MessageCard: View {
 
     private var sender: MailAddress? { item.parsed?.from.first ?? item.summary.from }
     private var hide: Bool { settings.hideQuotes && !showQuotes }
+    private var open: Bool { expanded || single }
+    private var mine: Bool { sender.map { account.isMine($0.email) } ?? false }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if expanded || single {
+            band
+            if open {
                 expandedView
-                if !single {
-                    Rectangle().fill(IOS3.separator).frame(height: 6)
-                }
             } else {
-                collapsedRow
+                collapsedSnippet
             }
         }
         .foregroundColor(.ink)
+        .background(IOS3.cell)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isLatest && !single ? IOS3.dateBlue.opacity(0.75) : IOS3.cardBorder, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 2, x: 0, y: 1)
     }
 
-    private var collapsedRow: some View {
-        Button {
-            withAnimation(.easeOut(duration: 0.15)) { expanded = true }
-        } label: {
-            CollapsedMessageLabel(item: item, sender: senderName, loading: loading, folderBadge: folderBadge)
-        }
-        .buttonStyle(InvertOnPressStyle())
+    private func toggle() {
+        guard !single else { return }
+        withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() }
     }
+
+    // MARK: 标题条：点按折叠 / 展开
+
+    private var band: some View {
+        Button(action: toggle) {
+            HStack(alignment: .center, spacing: 9) {
+                SenderBadge(name: senderName, key: sender?.email ?? senderName, mine: mine)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 5) {
+                        if !item.summary.seen { UnreadDot().scaleEffect(0.8) }
+                        Text(senderName)
+                            .font(RT.font(15, .bold))
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                        if let b = folderBadge {
+                            Text(b)
+                                .font(RT.font(10, .bold))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(IOS3.pill))
+                        }
+                        Spacer(minLength: 4)
+                        if item.summary.hasAttachment {
+                            Image(systemName: "paperclip").font(.system(size: 11, weight: .semibold)).foregroundColor(IOS3.secondary)
+                        }
+                        Text(Fmt.compact(item.parsed?.date ?? item.summary.received))
+                            .font(RT.font(12, .bold))
+                            .foregroundColor(IOS3.dateBlue)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    if open {
+                        recipientSummary
+                    }
+                }
+                if !single {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundColor(IOS3.chevron)
+                        .rotationEffect(.degrees(open ? 180 : 0))
+                        .frame(width: 16)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                LinearGradient(colors: open && !single ? [IOS3.cardBandOpenTop, IOS3.cardBandOpenBottom]
+                                                       : [IOS3.cardBandTop, IOS3.cardBandBottom],
+                               startPoint: .top, endPoint: .bottom)
+            )
+            .overlay(alignment: .top) { Rectangle().fill(IOS3.cardInnerLine).frame(height: 1) }
+            .overlay(alignment: .bottom) { Rectangle().fill(IOS3.cardBorder.opacity(0.6)).frame(height: 1) }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(CardBandPressStyle())
+        .allowsHitTesting(!single)
+        .accessibilityHint(single ? "" : (open ? tr("点按折叠", "Tap to collapse") : tr("点按展开", "Tap to expand")))
+    }
+
+    private var recipientSummary: some View {
+        let to = item.parsed?.to ?? item.summary.to
+        let cc = item.parsed?.cc ?? item.summary.cc
+        let all = to + cc
+        var text = tr("发给 ", "To ")
+        if let first = all.first {
+            text += account.isMine(first.email) ? tr("我", "me") : first.display
+            if all.count > 1 { text += tr(" 等 \(all.count) 人", " +\(all.count - 1)") }
+        } else {
+            text += "—"
+        }
+        return Text(text)
+            .font(RT.font(12))
+            .foregroundColor(IOS3.secondary)
+            .lineLimit(1)
+    }
+
+    private var collapsedSnippet: some View {
+        Button(action: toggle) {
+            Text(snippet)
+                .font(RT.font(13))
+                .foregroundColor(IOS3.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var snippet: String {
+        if let s = item.display?.snippet, !s.isEmpty { return s }
+        if let p = item.summary.preview, !p.isEmpty { return p }
+        if item.failed { return tr("无法载入，点按重试", "Couldn't load — tap to retry") }
+        if loading { return tr("正在下载…", "Downloading…") }
+        return item.summary.subject
+    }
+
+    // MARK: 展开内容
 
     @ViewBuilder
     private var expandedView: some View {
         VStack(alignment: .leading, spacing: 0) {
-            headerBlock
-            RetroDivider()
+            detailsBlock
+            Rectangle().fill(IOS3.separator).frame(height: 1)
             if let d = item.display {
                 ForEach(d.invites.indices, id: \.self) { i in
                     InviteBanner(event: d.invites[i].event) { onInvite(d.invites[i].attachment) }
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, 10)
                         .padding(.top, 10)
                 }
                 if d.hasRemote && !allowRemote {
@@ -558,7 +696,7 @@ struct MessageCard: View {
                             Image(systemName: "plus.magnifyingglass")
                             Text(tr("邮件较宽，已缩小显示 · 点此放大查看", "Wide message shrunk to fit · Tap to zoom"))
                                 .lineLimit(1)
-                                .minimumScaleFactor(0.8)
+                                .minimumScaleFactor(0.75)
                         }
                         .font(RT.font(13, .bold))
                         .foregroundColor(IOS3.dateBlue)
@@ -591,9 +729,10 @@ struct MessageCard: View {
                 }
                 if !d.parsed.attachments.isEmpty {
                     AttachmentList(attachments: d.parsed.attachments, account: account)
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 12)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 10)
                 }
+                actionStrip
             } else if item.failed && !loading {
                 Button(tr("无法载入这封邮件，点按重试", "Couldn't load this message. Tap to retry.")) {
                     expanded = false
@@ -616,97 +755,79 @@ struct MessageCard: View {
         }
     }
 
-    /// 紧凑的 iPhone OS 3 邮件头。
-    private var headerBlock: some View {
+    /// 发件人 / 收件人 / 时间（可展开详细信息）。
+    private var detailsBlock: some View {
         let to = item.parsed?.to ?? item.summary.to
         let cc = item.parsed?.cc ?? item.summary.cc
         let subject = item.parsed?.subject ?? item.summary.subject
         return VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .center, spacing: 6) {
-                Text(tr("发件人：", "From:")).font(RT.font(14)).foregroundColor(IOS3.secondary)
-                if let s = sender {
-                    AddressBubble(address: s, full: details, label: details ? nil : senderName)
-                }
-                if let badge = folderBadge {
-                    Text(badge).font(RT.font(11, .bold)).foregroundColor(IOS3.secondary).lineLimit(1)
-                }
-                Spacer(minLength: 4)
-                Button(details ? tr("隐藏", "Hide") : tr("详细信息", "Details")) { details.toggle() }
-                    .font(RT.font(14, .bold))
-                    .foregroundColor(IOS3.dateBlue)
-                    .buttonStyle(.plain)
+            if single {
+                Text(subject.isEmpty ? tr("（无主题）", "(No Subject)") : subject)
+                    .font(RT.font(17, .bold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
             if details {
+                if let s = sender { addressLine(tr("发件人：", "From:"), [s]) }
                 addressLine(tr("收件人：", "To:"), to)
                 if !cc.isEmpty { addressLine(tr("抄送：", "Cc:"), cc) }
-            } else {
-                HStack(spacing: 6) {
-                    Text(tr("收件人：", "To:")).font(RT.font(14)).foregroundColor(IOS3.secondary)
-                    if let first = to.first {
-                        AddressBubble(address: first, label: account.isMine(first.email) ? tr("我", "Me") : nil)
-                    }
-                    if to.count + cc.count > 1 {
-                        Text(tr("等 \(to.count + cc.count) 人", "and \(to.count + cc.count - 1) more"))
-                            .font(RT.font(13)).foregroundColor(IOS3.secondary).lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
-                }
             }
-            RetroDivider().padding(.vertical, 1)
-            HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    if single {
-                        Text(subject.isEmpty ? tr("（无主题）", "(No Subject)") : subject)
-                            .font(RT.font(17, .bold))
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
-                    }
-                    HStack(spacing: 10) {
-                        Text(Fmt.long(item.parsed?.date ?? item.summary.received))
-                            .font(RT.font(13))
-                            .foregroundColor(IOS3.secondary)
-                        if isLatest {
-                            Button(tr("标为未读", "Mark as Unread"), action: onMarkUnread)
-                                .font(RT.font(13, .bold))
-                                .foregroundColor(IOS3.dateBlue)
-                                .buttonStyle(.plain)
-                        }
-                    }
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(Fmt.long(item.parsed?.date ?? item.summary.received))
+                    .font(RT.font(12))
+                    .foregroundColor(IOS3.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 4)
+                Button(details ? tr("隐藏", "Hide") : tr("详细信息", "Details")) {
+                    withAnimation(.easeOut(duration: 0.15)) { details.toggle() }
                 }
-                Spacer(minLength: 6)
-                if !single {
-                    Button {
-                        withAnimation(.easeOut(duration: 0.15)) { expanded = false }
-                    } label: {
-                        Image(systemName: "chevron.up.circle").font(.system(size: 22))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundColor(IOS3.chevron)
-                }
-                Button(action: onZoom) {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right.circle").font(.system(size: 22))
-                }
+                .font(RT.font(13, .bold))
+                .foregroundColor(IOS3.dateBlue)
                 .buttonStyle(.plain)
-                .foregroundColor(IOS3.value)
-                .disabled(item.display == nil)
-                .accessibilityLabel(tr("全屏缩放查看", "Full screen zoom"))
-                Button(action: onActions) {
-                    Image(systemName: "arrowshape.turn.up.left.circle").font(.system(size: 24))
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(IOS3.value)
-                .disabled(item.display == nil)
+                .fixedSize()
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.vertical, 7)
+    }
+
+    /// 每封邮件底部的操作条。
+    private var actionStrip: some View {
+        HStack(spacing: 6) {
+            if isDraft {
+                stripButton(tr("编辑草稿", "Edit Draft")) { onCompose(.draft) }
+            } else {
+                stripButton(tr("回复", "Reply")) { onCompose(.reply) }
+                stripButton(tr("全部回复", "All")) { onCompose(.replyAll) }
+                stripButton(tr("转发", "Fwd")) { onCompose(.forward) }
+            }
+            stripButton(tr("缩放", "Zoom"), action: onZoom)
+            stripButton(tr("更多", "More"), action: onActions)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity)
+        .background(IOS3.cardStrip)
+        .overlay(alignment: .top) { Rectangle().fill(IOS3.separator).frame(height: 1) }
+    }
+
+    private func stripButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(RetroButtonStyle(compact: true))
     }
 
     private func addressLine(_ label: String, _ list: [MailAddress]) -> some View {
         HStack(alignment: .top, spacing: 6) {
-            Text(label).font(RT.font(14)).foregroundColor(IOS3.secondary).padding(.top, 2)
+            Text(label).font(RT.font(13)).foregroundColor(IOS3.secondary).padding(.top, 2)
+                .fixedSize()
             if list.isEmpty {
-                Text("—").font(RT.font(14)).foregroundColor(IOS3.secondary)
+                Text("—").font(RT.font(13)).foregroundColor(IOS3.secondary)
             } else {
                 FlowRow(spacing: 5) {
                     ForEach(list.indices, id: \.self) { i in
@@ -718,6 +839,57 @@ struct MessageCard: View {
     }
 }
 
+/// 卡片标题条按下时略微变暗。
+struct CardBandPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .overlay(Color.black.opacity(configuration.isPressed ? 0.12 : 0))
+    }
+}
+
+/// 发件人首字母徽章：每个发件人一种颜色，一眼区分是谁写的。
+struct SenderBadge: View {
+    let name: String
+    let key: String
+    var mine = false
+
+    private static let palette: [(String, String)] = [
+        ("#5B8FE0", "#2C5DB4"), ("#E0895B", "#B4552C"), ("#5BBF7A", "#2C8A4B"),
+        ("#B57BDB", "#7E46A8"), ("#E05B7C", "#B02C4D"), ("#4FB8C2", "#23838C"),
+        ("#D9B44A", "#A6801C"), ("#8A96A8", "#596476"),
+    ]
+
+    private var initial: String {
+        let t = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let c = t.first else { return "?" }
+        return String(c).uppercased()
+    }
+
+    private var colors: (String, String) {
+        if mine { return ("#7A8798", "#4C5868") }
+        var h: UInt32 = 2166136261
+        for b in key.lowercased().utf8 { h = (h ^ UInt32(b)) &* 16777619 }
+        return Self.palette[Int(h % UInt32(Self.palette.count))]
+    }
+
+    var body: some View {
+        let c = colors
+        ZStack {
+            Circle().fill(LinearGradient(colors: [HexColor.color(c.0), HexColor.color(c.1)], startPoint: .top, endPoint: .bottom))
+            Circle().fill(LinearGradient(colors: [.white.opacity(0.45), .white.opacity(0.05)], startPoint: .top, endPoint: .center))
+                .padding(1.5)
+                .mask(Rectangle().frame(height: 15).offset(y: -7.5))
+            Text(initial)
+                .font(RT.font(15, .bold))
+                .foregroundColor(.white)
+                .shadow(color: .black.opacity(0.35), radius: 0, x: 0, y: -1)
+        }
+        .frame(width: 30, height: 30)
+        .overlay(Circle().stroke(Color.black.opacity(0.25), lineWidth: 1))
+    }
+}
+
+/// 旧版折叠行（保留给其他地方使用）。
 struct CollapsedMessageLabel: View {
     let item: ThreadItem
     let sender: String
@@ -752,9 +924,10 @@ struct CollapsedMessageLabel: View {
                     if item.summary.hasAttachment {
                         Image(systemName: "paperclip").font(.system(size: 11)).foregroundColor(gray)
                     }
-                    Text(Fmt.short(item.summary.received))
+                    Text(Fmt.compact(item.summary.received))
                         .font(RT.font(13))
                         .foregroundColor(pressed ? .white : IOS3.dateBlue)
+                        .fixedSize()
                 }
                 Text(snippet)
                     .font(RT.font(13))

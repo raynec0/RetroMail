@@ -17,9 +17,29 @@ struct MailAccount: Codable, Identifiable, Hashable {
     var smtpSameAuth = true
     var allowInsecureTLS = false
     var saveToSent = true
+    /// 纯文本签名（旧版本保存的；也用于邮件的纯文本部分）
     var signature = ""
+    /// 富文本签名（HTML，可带格式、链接、Logo 图片）。可选字段：旧数据里没有也能正常读取
+    var signatureRich: String?
+    /// 新邮件是否自动加签名（nil = 是）
+    var signatureOnNew: Bool?
+    /// 回复/转发是否自动加签名（nil = 是）
+    var signatureOnReply: Bool?
 
     var address: MailAddress { MailAddress(name: name, email: email) }
+
+    var hasSignature: Bool {
+        !(signatureRich ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !signature.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 签名的 HTML（不含外层容器）
+    var signatureBodyHTML: String {
+        if let r = signatureRich, !r.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return r }
+        let plain = signature.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !plain.isEmpty else { return "" }
+        return "<div>--&nbsp;<br>" + HTMLText.escape(plain).replacingOccurrences(of: "\n", with: "<br>") + "</div>"
+    }
     var imapKey: String { "\(id.uuidString).imap" }
     var smtpKey: String { "\(id.uuidString).smtp" }
     var title: String { name.isEmpty ? email : "\(name) <\(email)>" }
@@ -448,6 +468,16 @@ enum Fmt {
         }
         if cal.isDate(d, equalTo: Date(), toGranularity: .year) { return string(d, zh: "M/d", en: "MMM d") }
         return string(d, zh: "yy/M/d", en: "M/d/yy")
+    }
+
+    /// 卡片标题栏用的短日期 + 时间：“17:12” / “昨天 17:12” / “10/12 17:12”
+    static func compact(_ d: Date) -> String {
+        let cal = Calendar.current
+        let time = string(d, zh: "HH:mm", en: "h:mm a")
+        if cal.isDateInToday(d) { return time }
+        if cal.isDateInYesterday(d) { return tr("昨天 ", "Yesterday ") + time }
+        if cal.isDate(d, equalTo: Date(), toGranularity: .year) { return string(d, zh: "M/d HH:mm", en: "MMM d, h:mm a") }
+        return string(d, zh: "yy/M/d HH:mm", en: "M/d/yy h:mm a")
     }
 
     static func long(_ d: Date) -> String {

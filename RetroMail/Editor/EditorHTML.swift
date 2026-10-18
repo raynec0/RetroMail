@@ -349,6 +349,17 @@ enum EditorHTML {
         }
         changed();
       },
+      setSignature: function (h) {
+        var s = ed.querySelector('.re-sig');
+        if (!h) { if (s) { s.remove(); changed(); } return; }
+        var html = '<div class="re-sig"><div><br></div>' + h + '</div>';
+        if (s) { s.outerHTML = html; }
+        else {
+          var q = ed.querySelector('.re-quote');
+          if (q) { q.insertAdjacentHTML('beforebegin', html); } else { ed.insertAdjacentHTML('beforeend', html); }
+        }
+        changed();
+      },
       bodyText: function () {
         var c = ed.cloneNode(true);
         var q = c.querySelector('.re-quote'); if (q) q.remove();

@@ -82,15 +82,35 @@ struct AccountEditView: View {
         RetroGroup(tr("身份", "Identity")) {
             RetroField(label: tr("显示名称", "Name"), text: $a.name, placeholder: tr("如：张三", "e.g. Jane Smith"))
             RetroField(label: tr("邮箱地址", "Email"), text: $a.email, placeholder: "name@company.com", keyboard: .emailAddress)
-            HStack(alignment: .top, spacing: 6) {
-                Text(tr("签名", "Signature")).font(RT.font(15, .bold)).frame(width: 92, alignment: .leading).padding(.top, 8)
-                TextEditor(text: $a.signature)
-                    .font(RT.font(15))
-                    .foregroundColor(IOS3.value)
-                    .scrollContentBackground(.hidden)
-                    .frame(height: 70)
+            NavigationLink {
+                SignatureEditorView(account: a) { updated in
+                    a = updated
+                    // 已有账户：签名立即保存，不用再点一次“存储”
+                    if existing != nil, !imapPass.isEmpty {
+                        AccountStore.shared.save(updated, imapPassword: imapPass, smtpPassword: smtpPass)
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Text(tr("签名", "Signature")).font(RT.font(15, .bold)).frame(width: 92, alignment: .leading)
+                    Text(signatureSummary)
+                        .font(RT.font(15))
+                        .foregroundColor(IOS3.value)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Chevron()
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
         }
+    }
+
+    private var signatureSummary: String {
+        guard a.hasSignature else { return tr("无", "None") }
+        let first = a.signature.split(whereSeparator: { $0.isNewline }).first.map(String.init) ?? ""
+        let t = first.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty || t == "--" ? tr("已设置", "Set") : t
     }
 
     private var imapGroup: some View {
@@ -289,6 +309,7 @@ struct SettingsView: View {
                         RetroCheckbox(label: tr("按会话分组（同一主题的往来邮件合并显示，包括“已发送”中的回复）",
                                                 "Group by conversation (includes your replies from Sent)"), isOn: $settings.threaded)
                         RetroCheckbox(label: tr("默认折叠引用的历史内容", "Collapse quoted history by default"), isOn: $settings.hideQuotes)
+                        RetroCheckbox(label: tr("首页邮箱按钮显示图标", "Show icons on mailbox buttons"), isOn: $settings.mailboxIcons)
                     }
 
                     RetroGroup(tr("账户", "Accounts")) {
@@ -355,8 +376,8 @@ struct SettingsView: View {
                     }
 
                     RetroGroup(tr("关于", "About")) {
-                        Text(tr("RetroMail 3.2\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
-                                "RetroMail 3.2\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
+                        Text(tr("RetroMail 3.3\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
+                                "RetroMail 3.3\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
                             .font(RT.font(12))
                             .fixedSize(horizontal: false, vertical: true)
                     }

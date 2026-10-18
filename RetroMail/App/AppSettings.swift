@@ -29,6 +29,7 @@ final class AppSettings: ObservableObject {
     private static let appearanceKey = "app.appearance"
     private static let threadedKey = "app.threaded"
     private static let hideQuotesKey = "app.hideQuotes"
+    private static let mailboxIconsKey = "app.mailboxIcons"
 
     @Published var appearance: Appearance {
         didSet { UserDefaults.standard.set(appearance.rawValue, forKey: Self.appearanceKey) }
@@ -48,6 +49,11 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(hideQuotes, forKey: Self.hideQuotesKey) }
     }
 
+    /// 首页邮箱按钮是否显示图标
+    @Published var mailboxIcons: Bool {
+        didSet { UserDefaults.standard.set(mailboxIcons, forKey: Self.mailboxIconsKey) }
+    }
+
     private init() {
         let d = UserDefaults.standard
         appearance = Appearance(rawValue: d.string(forKey: Self.appearanceKey) ?? "") ?? .system
@@ -61,6 +67,7 @@ final class AppSettings: ObservableObject {
         }
         threaded = d.object(forKey: Self.threadedKey) as? Bool ?? true
         hideQuotes = d.object(forKey: Self.hideQuotesKey) as? Bool ?? true
+        mailboxIcons = d.object(forKey: Self.mailboxIconsKey) as? Bool ?? true
     }
 
     var colorScheme: ColorScheme? {

@@ -579,6 +579,8 @@ struct ConversationRow: View {
                     Text(Fmt.short(m.received))
                         .font(RT.font(14))
                         .foregroundColor(pressed ? .white : IOS3.dateBlue)
+                        .lineLimit(1)
+                        .fixedSize()
                     Chevron()
                 }
                 HStack(spacing: 5) {

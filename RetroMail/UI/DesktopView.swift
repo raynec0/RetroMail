@@ -139,7 +139,7 @@ struct DesktopView: View {
             .shadow(color: IOS3.groupHeaderShadow, radius: 0, x: 0, y: 1)
             .padding(.horizontal, 8)
 
-            GroupedBox {
+            VStack(spacing: 8) {
                 accountRows(a)
             }
         }
@@ -162,21 +162,26 @@ struct DesktopView: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(IOS3.cell))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(IOS3.groupBorder, lineWidth: 1))
         } else if let folders = center.folders[a.id] {
             let shown = folders.filter(\.selectable)
             ForEach(shown) { f in
                 Button {
                     path.append(Route.folder(a, f))
                 } label: {
-                    MailboxRowLabel(folder: f, count: center.unread[center.unreadKey(a.id, f.path)] ?? 0,
-                                    last: f.id == shown.last?.id)
+                    MailboxBarLabel(folder: f, count: center.unread[center.unreadKey(a.id, f.path)] ?? 0,
+                                    showIcon: settings.mailboxIcons)
                 }
-                .buttonStyle(GroupedRowStyle())
+                .buttonStyle(MailboxBarStyle(nested: f.depth > 0))
+                .padding(.leading, CGFloat(min(f.depth, 3)) * 22)
             }
         } else {
             RetroBusy(text: tr("正在连接…", "Connecting…"))
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10).fill(IOS3.cell))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(IOS3.groupBorder, lineWidth: 1))
         }
     }
 
@@ -206,6 +211,104 @@ struct DesktopView: View {
             .frame(width: 54)
             .disabled(store.accounts.isEmpty)
         }
+    }
+}
+
+extension MailFolder {
+    /// 首页按钮用的图标（Oxygen / Tango 图标集，见 README 致谢）
+    var assetIcon: String {
+        switch role {
+        case .inbox: return "mbx-inbox"
+        case .sent: return "mbx-sent"
+        case .drafts: return "mbx-drafts"
+        case .junk: return "mbx-junk"
+        case .trash: return "mbx-trash"
+        case .archive: return "mbx-archive"
+        case .other:
+            let colors = ["blue", "orange", "green", "yellow", "violet", "red"]
+            var h: UInt32 = 2166136261
+            for b in path.utf8 { h = (h ^ UInt32(b)) &* 16777619 }
+            return "mbx-folder-" + colors[Int(h % UInt32(colors.count))]
+        }
+    }
+}
+
+/// 首页的长条玻璃按钮（iPhone OS 3 大按钮风格）：上亮下暗的渐变、上半部高光、深色描边、底部白色压印线。
+struct MailboxBarStyle: ButtonStyle {
+    var nested = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        MailboxBarBody(configuration: configuration, nested: nested)
+    }
+}
+
+private struct MailboxBarBody: View {
+    let configuration: ButtonStyleConfiguration
+    let nested: Bool
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let pressed = configuration.isPressed
+        let dark = scheme == .dark
+        let r: CGFloat = nested ? 9 : 11
+        let shape = RoundedRectangle(cornerRadius: r, style: .continuous)
+        configuration.label
+            .foregroundColor(pressed ? .white : (dark ? HexColor.color("#F2F2F2") : HexColor.color("#1E2733")))
+            .environment(\.rowPressed, pressed)
+            .frame(maxWidth: .infinity, minHeight: nested ? 46 : 56)
+            .background {
+                ZStack {
+                    if pressed {
+                        shape.fill(IOS3.selection)
+                    } else {
+                        shape.fill(LinearGradient(
+                            stops: dark
+                                ? [.init(color: HexColor.color("#4A4A4E"), location: 0), .init(color: HexColor.color("#2E2E31"), location: 0.5),
+                                   .init(color: HexColor.color("#232326"), location: 0.5), .init(color: HexColor.color("#1A1A1C"), location: 1)]
+                                : [.init(color: HexColor.color("#FFFFFF"), location: 0), .init(color: HexColor.color("#F1F3F6"), location: 0.5),
+                                   .init(color: HexColor.color("#E4E8ED"), location: 0.5), .init(color: HexColor.color("#D5DBE2"), location: 1)],
+                            startPoint: .top, endPoint: .bottom))
+                    }
+                    shape.strokeBorder(Color.white.opacity(dark ? 0.12 : 0.9), lineWidth: 1).padding(1)
+                    shape.stroke(dark ? Color.black : HexColor.color("#8E98A5"), lineWidth: 1)
+                }
+            }
+            .shadow(color: dark ? .black.opacity(0.7) : .white.opacity(0.85), radius: 0, x: 0, y: 1)
+            .shadow(color: .black.opacity(dark ? 0.4 : 0.12), radius: 2, x: 0, y: 1)
+            .scaleEffect(pressed ? 0.985 : 1)
+            .animation(.easeOut(duration: 0.08), value: pressed)
+    }
+}
+
+struct MailboxBarLabel: View {
+    let folder: MailFolder
+    let count: Int
+    var showIcon = true
+    @Environment(\.rowPressed) private var pressed
+
+    var body: some View {
+        let nested = folder.depth > 0
+        HStack(spacing: 12) {
+            if showIcon {
+                Image(folder.assetIcon)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: nested ? 30 : 38, height: nested ? 30 : 38)
+                    .shadow(color: .black.opacity(0.25), radius: 1, x: 0, y: 1)
+            }
+            Text(folder.displayName)
+                .font(RT.font(nested ? 16 : 18, .bold))
+                .shadow(color: pressed ? .black.opacity(0.3) : .white.opacity(0.6), radius: 0, x: 0, y: pressed ? -1 : 1)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 6)
+            if count > 0 { CountPill(count: count) }
+            Chevron()
+        }
+        .padding(.leading, showIcon ? 10 : 16)
+        .padding(.trailing, 12)
+        .contentShape(Rectangle())
     }
 }
 
@@ -314,7 +417,7 @@ struct AboutBox: View {
         RetroDialog {
             VStack(spacing: 10) {
                 Text("RetroMail").font(RT.font(18, .bold))
-                Text(tr("版本 3.2", "Version 3.2")).font(RT.font(14))
+                Text(tr("版本 3.3", "Version 3.3")).font(RT.font(14))
                 Text(tr("iPhone OS 3 风格的邮件客户端。\nIMAP · SMTP · 会话 · 富文本 · AI",
                         "A mail client in the style of iPhone OS 3.\nIMAP · SMTP · Threads · Rich text · AI"))
                     .font(RT.font(14))
