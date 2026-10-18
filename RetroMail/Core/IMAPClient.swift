@@ -71,6 +71,10 @@ final class IMAPConnection: @unchecked Sendable {
         selected = nil
     }
 
+    func setReadTimeout(_ t: TimeInterval) {
+        socket?.readTimeout = t
+    }
+
     func logout() async {
         socket?.readTimeout = 5
         _ = try? await run("LOGOUT")
@@ -447,11 +451,16 @@ final class IMAPConnection: @unchecked Sendable {
     }
 }
 
-/// 每个账户一个客户端：串行执行命令、自动重连一次。
+/// 一条 IMAP 连接的客户端：串行执行命令，闲置后先探活，断线自动重连一次。
+/// MailCenter 为每个账户开多条（交互 / 列表 / 后台），互不阻塞。
 final class IMAPClient: @unchecked Sendable {
     private let config: ServerConfig
     private let lock = AsyncLock()
     private var connection: IMAPConnection?
+    private var lastUsed = Date.distantPast
+
+    /// 超过这个时间没用过的连接，先发 NOOP 确认还活着（手机切后台后连接常被静默断开）。
+    static let idleProbeAfter: TimeInterval = 120
 
     init(config: ServerConfig) {
         self.config = config
@@ -461,6 +470,7 @@ final class IMAPClient: @unchecked Sendable {
         await lock.lock()
         do {
             let r = try await attempt(op)
+            lastUsed = Date()
             await lock.unlock()
             return r
         } catch {
@@ -469,8 +479,23 @@ final class IMAPClient: @unchecked Sendable {
         }
     }
 
+    /// 预先建立连接并登录，后续操作无需等待握手。
+    func warm() async {
+        _ = try? await perform { _ in true }
+    }
+
     private func attempt<T>(_ op: (IMAPConnection) async throws -> T) async throws -> T {
         var retried = false
+        if let c = connection, Date().timeIntervalSince(lastUsed) > Self.idleProbeAfter {
+            c.setReadTimeout(8)
+            do {
+                try await c.run("NOOP")
+                c.setReadTimeout(45)
+            } catch {
+                c.close()
+                connection = nil
+            }
+        }
         while true {
             let conn: IMAPConnection
             if let c = connection {

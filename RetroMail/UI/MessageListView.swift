@@ -5,8 +5,14 @@ final class MessageListModel: ObservableObject {
     let account: MailAccount
     let folder: MailFolder
 
-    @Published var messages: [MessageSummary] = []
-    @Published var searchResults: [MessageSummary]?
+    @Published var messages: [MessageSummary] = [] {
+        didSet { regroup() }
+    }
+    @Published var searchResults: [MessageSummary]? {
+        didSet { regroup() }
+    }
+    /// 分组结果缓存起来，避免每次界面刷新都重新计算。
+    @Published private(set) var conversations: [Conversation] = []
     @Published var query = ""
     @Published var loading = false
     @Published var searching = false
@@ -20,16 +26,16 @@ final class MessageListModel: ObservableObject {
         self.folder = folder
     }
 
-    var client: IMAPClient { MailCenter.shared.client(for: account) }
+    /// 打开邮件、标记、删除等用户正在等待的操作。
+    var client: IMAPClient { MailCenter.shared.client(for: account, .interactive) }
+    /// 刷新列表、加载更多、搜索。
+    var syncClient: IMAPClient { MailCenter.shared.client(for: account, .sync) }
     var visible: [MessageSummary] { searchResults ?? messages }
 
-    /// 按会话分组后的列表（关闭分组时每封邮件单独一行），按最近收到时间排序。
-    var conversations: [Conversation] {
+    /// 按会话分组（关闭分组时每封邮件单独一行），按最近收到时间排序。
+    func regroup() {
         let list = visible.sorted(by: MessageSummary.newestFirst)
-        if AppSettings.shared.threaded {
-            return Threading.group(list)
-        }
-        return list.map { Conversation(messages: [$0]) }
+        conversations = AppSettings.shared.threaded ? Threading.group(list) : list.map { Conversation(messages: [$0]) }
     }
 
     func initialLoad() async {
@@ -44,7 +50,7 @@ final class MessageListModel: ObservableObject {
         defer { loading = false }
         let path = folder.path
         do {
-            let result = try await client.perform { try await $0.fetchLatest(path, limit: 60) }
+            let result = try await syncClient.perform { try await $0.fetchLatest(path, limit: 60) }
             messages = result.messages.sorted(by: MessageSummary.newestFirst)
             hasMore = result.hasMore
             DiskCache.saveList(Array(messages.prefix(120)), account: account.id, folder: path)
@@ -55,7 +61,8 @@ final class MessageListModel: ObservableObject {
             if !hasMore || unseen == 0 {
                 MailCenter.shared.unread[MailCenter.shared.unreadKey(account.id, path)] = unseen
             } else {
-                Task { await MailCenter.shared.refreshUnread(account) }
+                let acc = account
+                Task { await MailCenter.shared.refreshUnread(acc, paths: [path]) }
             }
         } catch {
             self.error = error.localizedDescription
@@ -68,7 +75,7 @@ final class MessageListModel: ObservableObject {
         defer { loadingMore = false }
         let path = folder.path
         do {
-            let result = try await client.perform { try await $0.fetchOlder(path, below: minUID, limit: 60) }
+            let result = try await syncClient.perform { try await $0.fetchOlder(path, below: minUID, limit: 60) }
             let existing = Set(messages.map(\.uid))
             messages = (messages + result.messages.filter { !existing.contains($0.uid) }).sorted(by: MessageSummary.newestFirst)
             hasMore = result.hasMore
@@ -87,7 +94,7 @@ final class MessageListModel: ObservableObject {
         defer { searching = false }
         let path = folder.path
         do {
-            let found = try await client.perform { try await $0.search(path, query: q, limit: 150) }
+            let found = try await syncClient.perform { try await $0.search(path, query: q, limit: 150) }
             searchResults = found.sorted(by: MessageSummary.newestFirst)
         } catch {
             self.error = error.localizedDescription
@@ -144,7 +151,9 @@ final class MessageListModel: ObservableObject {
         remove(uids)
         let path = folder.path
         await sync { try await $0.move(path, uids: uids, to: dest.path) }
-        Task { await MailCenter.shared.refreshUnread(account) }
+        let acc = account
+        let paths = [path, dest.path]
+        Task { await MailCenter.shared.refreshUnread(acc, paths: paths) }
     }
 
     private func sync(_ op: (IMAPConnection) async throws -> Void) async {
@@ -191,7 +200,7 @@ struct MessageListView: View {
         }
         .overlay(alignment: .bottomTrailing) {
             if !selecting {
-                TileButton(symbol: "square.and.pencil", label: tr("新邮件", "Compose"), size: 58) {
+                SpringButton(symbol: "square.and.pencil", label: tr("新邮件", "Compose"), colors: .blue, size: 58, plate: true) {
                     compose = ComposeRequest(account: account)
                 }
                 .padding(18)
@@ -199,6 +208,7 @@ struct MessageListView: View {
         }
         .retroAlert($model.error)
         .task { await model.initialLoad() }
+        .onChange(of: settings.threaded) { _ in model.regroup() }
         .navigationDestination(isPresented: Binding(get: { openConversation != nil },
                                                     set: { if !$0 { openConversation = nil } })) {
             if let c = openConversation {
@@ -374,14 +384,14 @@ struct MessageListView: View {
             RetroDivider()
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
-                    TileButton(symbol: "checklist", label: tr("全选", "All"), size: 50) {
+                    SpringButton(symbol: "checklist", label: tr("全选", "All"), colors: .indigo, size: 40) {
                         selection = Set(convs.map(\.id))
                     }
-                    TileButton(symbol: "envelope.open", label: tr("已读", "Read"), size: 50) { finish { await model.setSeen(uids, true) } }
-                    TileButton(symbol: "envelope.badge", label: tr("未读", "Unread"), size: 50) { finish { await model.setSeen(uids, false) } }
-                    TileButton(symbol: "flag", label: tr("旗标", "Flag"), size: 50) { finish { await model.setFlagged(uids, true) } }
-                    TileButton(symbol: "folder", label: tr("移动", "Move"), size: 50) { if !selection.isEmpty { showMove = true } }
-                    TileButton(symbol: "trash", label: tr("删除", "Delete"), size: 50) { finish { await model.delete(uids) } }
+                    SpringButton(symbol: "envelope.open.fill", label: tr("已读", "Read"), colors: .teal, size: 40) { finish { await model.setSeen(uids, true) } }
+                    SpringButton(symbol: "envelope.badge.fill", label: tr("未读", "Unread"), colors: .orange, size: 40) { finish { await model.setSeen(uids, false) } }
+                    SpringButton(symbol: "flag.fill", label: tr("旗标", "Flag"), colors: .red, size: 40) { finish { await model.setFlagged(uids, true) } }
+                    SpringButton(symbol: "folder.fill", label: tr("移动", "Move"), colors: .brown, size: 40) { if !selection.isEmpty { showMove = true } }
+                    SpringButton(symbol: "trash.fill", label: tr("删除", "Delete"), colors: .gray, size: 40) { finish { await model.delete(uids) } }
                 }
                 .padding(10)
                 .padding(.trailing, 4)

@@ -12,21 +12,32 @@ final class MailCenter: ObservableObject {
     @Published var folderErrors: [UUID: String] = [:]
     @Published var loadingAccounts: Set<UUID> = []
 
-    private var clients: [UUID: IMAPClient] = [:]
+    /// 每个账户三条独立连接，互不排队：
+    /// - interactive：打开邮件、标记、移动、删除（用户正在等的操作）
+    /// - sync：刷新邮件列表、加载更早的邮件、搜索
+    /// - background：未读数、会话关联查找、预取正文
+    enum Lane: String, CaseIterable {
+        case interactive, sync, background
+    }
+
+    private var clients: [String: IMAPClient] = [:]
 
     private init() {}
 
-    func client(for a: MailAccount) -> IMAPClient {
-        if let c = clients[a.id] { return c }
+    func client(for a: MailAccount, _ lane: Lane = .interactive) -> IMAPClient {
+        let key = a.id.uuidString + "|" + lane.rawValue
+        if let c = clients[key] { return c }
         let c = IMAPClient(config: a.imapConfig())
-        clients[a.id] = c
+        clients[key] = c
         return c
     }
 
     /// 账户设置改变后丢弃旧连接。
     func reset(_ id: UUID) {
-        if let old = clients.removeValue(forKey: id) {
-            Task { await old.shutdown() }
+        for lane in Lane.allCases {
+            if let old = clients.removeValue(forKey: id.uuidString + "|" + lane.rawValue) {
+                Task { await old.shutdown() }
+            }
         }
         folders[id] = nil
         folderErrors[id] = nil
@@ -55,21 +66,28 @@ final class MailCenter: ObservableObject {
         loadingAccounts.insert(a.id)
         defer { loadingAccounts.remove(a.id) }
         do {
-            let list = try await client(for: a).perform { try await $0.listFolders() }
+            let list = try await client(for: a, .sync).perform { try await $0.listFolders() }
             let sorted = MailFolder.sorted(list)
             folders[a.id] = sorted
             folderErrors[a.id] = nil
             DiskCache.saveFolders(sorted, account: a.id)
-            await refreshUnread(a)
+            // 未读数在后台连接上慢慢查，同时预先连好“交互”连接，打开邮件时不用再握手。
+            Task { await self.refreshUnread(a) }
+            Task { await self.client(for: a, .interactive).warm() }
         } catch {
             folderErrors[a.id] = error.localizedDescription
         }
     }
 
-    func refreshUnread(_ a: MailAccount) async {
+    func refreshUnread(_ a: MailAccount, paths: [String]? = nil) async {
         guard let list = folders[a.id] else { return }
-        let c = client(for: a)
-        for f in list where f.selectable && ![.sent, .drafts, .trash].contains(f.role) {
+        let c = client(for: a, .background)
+        let targets = list.filter { f in
+            if let p = paths { return p.contains(f.path) }
+            return f.selectable && ![.sent, .drafts, .trash].contains(f.role)
+        }
+        // 收件箱优先
+        for f in targets.sorted(by: { $0.role.order < $1.role.order }) {
             let p = f.path
             if let st = try? await c.perform({ try await $0.status(p) }) {
                 unread[unreadKey(a.id, p)] = st.unseen
@@ -96,7 +114,7 @@ final class MailCenter: ObservableObject {
         for role in [FolderRole.inbox, .sent] {
             if let f = folder(a, role: role), f.path != currentFolder { targets.append(f.path) }
         }
-        let c = client(for: a)
+        let c = client(for: a, .background)
         var out: [(folder: String, summary: MessageSummary)] = []
         for path in targets {
             guard let found = try? await c.perform({ try await $0.searchSubject(path, subject: core, limit: 30) }) else { continue }

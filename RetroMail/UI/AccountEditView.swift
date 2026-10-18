@@ -262,7 +262,7 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @AppStorage(BackgroundRefresh.enabledKey) private var notify = false
     @State private var message: String?
-    @State private var cacheSize = DiskCache.sizeDescription
+    @State private var cacheSize = "…"
     @State private var showAI = false
     @State private var aiConfigured = AIConfig.isConfigured
 
@@ -331,16 +331,21 @@ struct SettingsView: View {
                             Text(tr("离线缓存：", "Offline cache: ") + cacheSize).font(RT.font(13))
                             Spacer()
                             Button(tr("清除", "Clear")) {
-                                DiskCache.clear()
-                                cacheSize = DiskCache.sizeDescription
+                                cacheSize = "…"
+                                Task {
+                                    cacheSize = await Task.detached { () -> String in
+                                        DiskCache.clear()
+                                        return DiskCache.sizeDescription
+                                    }.value
+                                }
                             }
                             .buttonStyle(RetroButtonStyle(compact: true))
                         }
                     }
 
                     RetroGroup(tr("关于", "About")) {
-                        Text(tr("RetroMail 2.0\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
-                                "RetroMail 2.0\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
+                        Text(tr("RetroMail 2.1\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
+                                "RetroMail 2.1\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
                             .font(RT.font(12))
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -350,6 +355,7 @@ struct SettingsView: View {
             }
         }
         .retroAlert($message)
+        .task { cacheSize = await Task.detached { DiskCache.sizeDescription }.value }
         .sheet(isPresented: $showAI, onDismiss: { aiConfigured = AIConfig.isConfigured }) {
             AISettingsSheet()
                 .preferredColorScheme(settings.colorScheme)

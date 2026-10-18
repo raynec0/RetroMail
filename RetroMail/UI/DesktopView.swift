@@ -18,14 +18,19 @@ struct DesktopView: View {
         NavigationStack(path: $path) {
             VStack(spacing: 0) {
                 menuBar
-                if store.accounts.isEmpty {
-                    welcome
-                } else {
-                    mailboxes
+                ZStack(alignment: .bottom) {
+                    SpringWallpaper()
+                    if store.accounts.isEmpty {
+                        welcome
+                    } else {
+                        springboard
+                    }
+                    dock
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 10)
                 }
             }
             .background(Color.paper.ignoresSafeArea())
-            .overlay(alignment: .bottomTrailing) { floatingTiles }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Route.self) { route in
                 switch route {
@@ -94,13 +99,11 @@ struct DesktopView: View {
     // MARK: 首次使用
 
     private var welcome: some View {
-        ZStack(alignment: .top) {
-            DitherBackground()
+        VStack {
             RetroWindow(title: tr("欢迎使用 RetroMail", "Welcome to RetroMail"), fill: false) {
                 VStack(alignment: .leading, spacing: 16) {
-                    HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: "envelope.open")
-                            .font(.system(size: 34))
+                    HStack(alignment: .top, spacing: 14) {
+                        GlossyIcon(symbol: "envelope.fill", colors: .blue, size: 52)
                         Text(tr("还没有邮箱账户。\n\n添加一个 IMAP/SMTP 账户即可开始收发邮件。企业邮箱需要在管理后台开启 IMAP 服务。",
                                 "No mail accounts yet.\n\nAdd an IMAP/SMTP account to start. Company mailboxes may need IMAP enabled by your administrator."))
                             .font(RT.font(13))
@@ -116,139 +119,110 @@ struct DesktopView: View {
                 .foregroundColor(.ink)
             }
             .padding(20)
-            .padding(.top, 30)
+            .padding(.top, 20)
+            Spacer()
         }
     }
 
-    // MARK: 邮箱（全屏）
+    // MARK: 桌面（图标网格）
 
-    private var mailboxes: some View {
-        VStack(spacing: 0) {
-            StripedTitleBar(title: tr("邮箱", "Mailboxes"))
-            List {
+    private let columns = [GridItem(.adaptive(minimum: 78, maximum: 110), spacing: 10, alignment: .top)]
+
+    private var springboard: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
                 ForEach(store.accounts) { a in
-                    Section {
-                        accountRows(a)
-                    } header: {
-                        accountHeader(a)
+                    VStack(alignment: .leading, spacing: 14) {
+                        accountLabel(a)
+                        accountIcons(a)
                     }
                 }
-                Color.clear
-                    .frame(height: 90)
-                    .listRowBackground(Color.paper)
-                    .listRowSeparator(.hidden)
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .background(Color.paper)
-            .environment(\.defaultMinListRowHeight, 1)
-            .refreshable { await center.loadAll() }
+            .padding(.horizontal, 14)
+            .padding(.top, 18)
+            .padding(.bottom, 130)
         }
+        .refreshable { await center.loadAll() }
     }
 
-    private func accountHeader(_ a: MailAccount) -> some View {
+    private func accountLabel(_ a: MailAccount) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: "person.crop.square")
-            Text(a.name.isEmpty ? a.email : "\(a.name)  \(a.email)")
-                .font(RT.font(12, .bold))
+            Image(systemName: "person.crop.square.fill")
+            Text(a.name.isEmpty ? a.email : "\(a.name) · \(a.email)")
                 .lineLimit(1)
-            Spacer()
             if center.loadingAccounts.contains(a.id) {
-                Image(systemName: "hourglass").font(.system(size: 12))
+                Image(systemName: "hourglass")
             }
         }
+        .font(RT.font(12, .bold))
         .foregroundColor(.paper)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
         .background(Color.ink)
-        .listRowInsets(EdgeInsets())
+        .background(Rectangle().fill(Color.ink.opacity(0.4)).offset(x: 2, y: 2))
     }
 
     @ViewBuilder
-    private func accountRows(_ a: MailAccount) -> some View {
+    private func accountIcons(_ a: MailAccount) -> some View {
         if let err = center.folderErrors[a.id], center.folders[a.id] == nil {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("⚠ \(err)")
-                    .font(RT.font(12))
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 12) {
-                    Button(tr("重试", "Retry")) { Task { await center.loadFolders(a) } }
-                        .buttonStyle(RetroButtonStyle(compact: true))
-                    Button(tr("账户设置", "Account Settings")) { path.append(Route.account(a)) }
-                        .buttonStyle(RetroButtonStyle(compact: true))
+            RetroWindow(title: tr("无法连接", "Can't Connect"), fill: false) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("⚠ \(err)")
+                        .font(RT.font(12))
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 12) {
+                        Button(tr("重试", "Retry")) { Task { await center.loadFolders(a) } }
+                            .buttonStyle(RetroButtonStyle(compact: true))
+                        Button(tr("账户设置", "Account Settings")) { path.append(Route.account(a)) }
+                            .buttonStyle(RetroButtonStyle(compact: true))
+                    }
                 }
+                .padding(12)
+                .foregroundColor(.ink)
             }
-            .foregroundColor(.ink)
-            .padding(12)
-            .listRowInsets(EdgeInsets())
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.paper)
         } else if let folders = center.folders[a.id] {
-            ForEach(folders) { f in
-                folderRow(a, f)
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
+                ForEach(folders.filter(\.selectable)) { f in
+                    SpringButton(symbol: f.role.springSymbol,
+                                 label: f.displayName,
+                                 colors: f.iconColors,
+                                 size: 60,
+                                 badge: center.unread[center.unreadKey(a.id, f.path)] ?? 0,
+                                 plate: true,
+                                 labelWidth: 84) {
+                        path.append(Route.folder(a, f))
+                    }
+                }
             }
         } else {
             RetroBusy(text: tr("正在连接服务器…", "Connecting…"))
-                .padding(12)
-                .listRowInsets(EdgeInsets())
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.paper)
+                .padding(8)
+                .background(Color.paper)
+                .overlay(Rectangle().stroke(Color.ink, lineWidth: 1))
         }
     }
 
-    private func folderRow(_ a: MailAccount, _ f: MailFolder) -> some View {
-        let count = center.unread[center.unreadKey(a.id, f.path)] ?? 0
-        return Button {
-            if f.selectable { path.append(Route.folder(a, f)) }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: f.role.icon)
-                    .font(.system(size: 15))
-                    .frame(width: 22)
-                Text(f.displayName)
-                    .font(RT.font(15, count > 0 ? .bold : .regular))
-                    .lineLimit(1)
-                Spacer()
-                if count > 0 {
-                    Text("\(count)")
-                        .font(RT.font(12, .bold))
-                        .foregroundColor(.paper)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(Color.ink))
-                }
-                Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold)).opacity(0.5)
-            }
-            .padding(.leading, 12 + CGFloat(f.depth) * 18)
-            .padding(.trailing, 12)
-            .padding(.vertical, 11)
-            .contentShape(Rectangle())
-            .opacity(f.selectable ? 1 : 0.4)
-            .overlay(alignment: .bottom) { RetroDivider(dotted: true).opacity(0.5) }
-        }
-        .buttonStyle(InvertOnPressStyle())
-        .disabled(!f.selectable)
-        .listRowInsets(EdgeInsets())
-        .listRowSeparator(.hidden)
-        .listRowBackground(Color.paper)
-    }
+    // MARK: Dock
 
-    // MARK: 浮动按钮
-
-    private var floatingTiles: some View {
-        HStack(spacing: 14) {
-            TileButton(symbol: "gearshape", label: tr("控制面板", "Settings"), size: 60) {
-                path.append(Route.settings)
-            }
-            if !store.accounts.isEmpty {
-                TileButton(symbol: "square.and.pencil", label: tr("新邮件", "Compose"), size: 60) {
-                    compose = ComposeRequest()
+    private var dock: some View {
+        SpringDock {
+            Group {
+                if store.accounts.isEmpty {
+                    SpringButton(symbol: "person.crop.circle.badge.plus", label: tr("添加账户", "Add Account"),
+                                 colors: .blue, size: 54) { path.append(Route.account(nil)) }
+                } else {
+                    SpringButton(symbol: "square.and.pencil", label: tr("新邮件", "Compose"),
+                                 colors: .blue, size: 54) { compose = ComposeRequest() }
+                    SpringButton(symbol: "arrow.clockwise", label: tr("全部刷新", "Refresh"),
+                                 colors: .green, size: 54) { Task { await center.loadAll() } }
                 }
+                SpringButton(symbol: "gearshape.fill", label: tr("控制面板", "Settings"),
+                             colors: .graphite, size: 54) { path.append(Route.settings) }
+                SpringButton(symbol: "info", label: tr("关于", "About"),
+                             colors: .purple, size: 54) { showAbout = true }
             }
+            .frame(maxWidth: .infinity)
         }
-        .padding(.trailing, 18)
-        .padding(.bottom, 18)
     }
 }
 
@@ -261,7 +235,7 @@ struct AboutBox: View {
                 Image(systemName: "envelope")
                     .font(.system(size: 40))
                 Text("RetroMail").font(RT.font(22, .bold))
-                Text(tr("版本 2.0", "Version 2.0")).font(RT.font(12))
+                Text(tr("版本 2.1", "Version 2.1")).font(RT.font(12))
                 RetroDivider()
                 Text(tr("一个黑白的、老派的邮件客户端。\nIMAP · SMTP · 会话 · 富文本 · AI",
                         "A black-and-white, old-school mail client.\nIMAP · SMTP · Threads · Rich text · AI"))

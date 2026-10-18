@@ -40,21 +40,43 @@ final class ConversationModel: ObservableObject {
         items.last { $0.parsed != nil }
     }
 
+    /// 正在下载正文的邮件
+    @Published private(set) var inFlight: Set<String> = []
+    private var backgroundWork: Task<Void, Never>?
+
+    /// 后台预取正文的大小上限；更大的邮件（通常带大附件）等用户点开再下载。
+    private static let prefetchLimit = 400_000
+
+    /// 先只下载并显示最新一封，其余工作（标记已读、查找关联邮件、预取旧邮件）都放到后台，不阻塞界面。
     func load() async {
-        if let last = items.last { await fetch(last.id) }
+        if let last = items.last { await fetch(last.id, lane: .interactive) }
+
         let unseen = items.filter { $0.folder == currentFolder && !$0.summary.seen }.map(\.summary.uid)
         if !unseen.isEmpty {
-            await list.setSeen(unseen, true)
             for i in items.indices where unseen.contains(items[i].summary.uid) && items[i].folder == currentFolder {
                 items[i].summary.set("\\Seen", true)
             }
+            let list = self.list
+            Task { await list.setSeen(unseen, true) }
         }
-        if AppSettings.shared.threaded {
-            await loadRelated()
+
+        backgroundWork?.cancel()
+        backgroundWork = Task { [weak self] in
+            guard let self = self else { return }
+            if AppSettings.shared.threaded {
+                await self.loadRelated()
+            }
+            for id in self.items.reversed().map(\.id) {
+                if Task.isCancelled { return }
+                await self.fetch(id, lane: .background, prefetch: true)
+            }
         }
-        for id in items.reversed().map(\.id) {
-            await fetch(id)
-        }
+    }
+
+    /// 离开页面时停止后台下载。
+    func stop() {
+        backgroundWork?.cancel()
+        backgroundWork = nil
     }
 
     private func loadRelated() async {
@@ -62,37 +84,50 @@ final class ConversationModel: ObservableObject {
         defer { loadingRelated = false }
         let conv = Conversation(messages: items.map(\.summary).sorted(by: MessageSummary.newestFirst))
         let found = await MailCenter.shared.relatedMessages(account, conversation: conv, currentFolder: currentFolder)
+        if Task.isCancelled || found.isEmpty { return }
         var knownIds = Set(items.compactMap { $0.summary.messageId })
         var knownKeys = Set(items.map(\.id))
+        var merged = items
         for (folder, m) in found {
             if let mid = m.messageId, knownIds.contains(mid) { continue }
             let item = ThreadItem(folder: folder, summary: m)
             if knownKeys.contains(item.id) { continue }
-            items.append(item)
+            merged.append(item)
             knownKeys.insert(item.id)
             if let mid = m.messageId { knownIds.insert(mid) }
         }
-        items.sort { $0.summary.received < $1.summary.received }
-        if items.count > 40 { items = Array(items.suffix(40)) }
+        merged.sort { $0.summary.received < $1.summary.received }
+        if merged.count > 40 { merged = Array(merged.suffix(40)) }
+        items = merged
     }
 
-    func fetch(_ id: String) async {
-        guard let idx = items.firstIndex(where: { $0.id == id }), items[idx].parsed == nil else { return }
+    func fetch(_ id: String, lane: MailCenter.Lane = .interactive, prefetch: Bool = false) async {
+        guard let idx = items.firstIndex(where: { $0.id == id }), items[idx].parsed == nil,
+              !inFlight.contains(id) else { return }
         let item = items[idx]
         let path = item.folder
         let uid = item.summary.uid
         let accountId = account.id
+        let cached = await Task.detached { DiskCache.loadRaw(account: accountId, folder: path, uid: uid) }.value
+        if prefetch && cached == nil && item.summary.size > Self.prefetchLimit { return }
+        inFlight.insert(id)
+        defer { inFlight.remove(id) }
         do {
             let raw: Data
-            if let cached = DiskCache.loadRaw(account: accountId, folder: path, uid: uid) {
-                raw = cached
+            if let c = cached {
+                raw = c
             } else {
-                raw = try await list.client.perform { try await $0.fetchRaw(path, uid: uid) }
-                DiskCache.saveRaw(raw, account: accountId, folder: path, uid: uid)
+                let client = MailCenter.shared.client(for: account, lane)
+                raw = try await client.perform { try await $0.fetchRaw(path, uid: uid) }
+                Task.detached { DiskCache.saveRaw(raw, account: accountId, folder: path, uid: uid) }
             }
             let parsed = await Task.detached { ParsedMessage.parse(raw) }.value
-            if let i = items.firstIndex(where: { $0.id == id }) { items[i].parsed = parsed }
+            if let i = items.firstIndex(where: { $0.id == id }) {
+                items[i].parsed = parsed
+                items[i].failed = false
+            }
         } catch {
+            if prefetch { return }
             if let i = items.firstIndex(where: { $0.id == id }) { items[i].failed = true }
             if id == items.last?.id { self.error = error.localizedDescription }
         }
@@ -186,6 +221,7 @@ struct ConversationView: View {
         }
         .retroAlert($model.error)
         .task { await model.load() }
+        .onDisappear { model.stop() }
         .fullScreenCover(item: $compose) {
             ComposeView(request: $0)
                 .environmentObject(settings)
@@ -254,6 +290,7 @@ struct ConversationView: View {
         MessageCard(
             item: item,
             isLatest: item.id == model.items.last?.id,
+            loading: model.inFlight.contains(item.id),
             expanded: Binding(
                 get: { model.expanded.contains(item.id) },
                 set: { on in
@@ -286,21 +323,21 @@ struct ConversationView: View {
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 10) {
                 if isDraft {
-                    TileButton(symbol: "square.and.pencil", label: tr("编辑", "Edit"), size: 52) { startCompose(.draft) }
+                    SpringButton(symbol: "square.and.pencil", label: tr("编辑", "Edit"), colors: .blue, size: 42) { startCompose(.draft) }
                 } else {
-                    TileButton(symbol: "arrowshape.turn.up.left", label: tr("回复", "Reply"), size: 52) { startCompose(.reply) }
-                    TileButton(symbol: "arrowshape.turn.up.left.2", label: tr("全部回复", "Reply All"), size: 52) { startCompose(.replyAll) }
-                    TileButton(symbol: "arrowshape.turn.up.right", label: tr("转发", "Forward"), size: 52) { startCompose(.forward) }
+                    SpringButton(symbol: "arrowshape.turn.up.left.fill", label: tr("回复", "Reply"), colors: .blue, size: 42) { startCompose(.reply) }
+                    SpringButton(symbol: "arrowshape.turn.up.left.2.fill", label: tr("全部回复", "Reply All"), colors: .indigo, size: 42) { startCompose(.replyAll) }
+                    SpringButton(symbol: "arrowshape.turn.up.right.fill", label: tr("转发", "Forward"), colors: .purple, size: 42) { startCompose(.forward) }
                 }
-                TileButton(symbol: "sparkles", label: tr("AI 总结", "AI Recap"), size: 52) { showSummary = true }
-                TileButton(symbol: "envelope.badge", label: tr("未读", "Unread"), size: 52) {
+                SpringButton(symbol: "sparkles", label: tr("AI 总结", "AI Recap"), colors: .pink, size: 42) { showSummary = true }
+                SpringButton(symbol: "envelope.badge.fill", label: tr("未读", "Unread"), colors: .orange, size: 42) {
                     Task {
                         await model.markLatestUnread()
                         dismiss()
                     }
                 }
-                TileButton(symbol: "folder", label: tr("移动", "Move"), size: 52) { showMove = true }
-                TileButton(symbol: "trash", label: tr("删除", "Delete"), size: 52) {
+                SpringButton(symbol: "folder.fill", label: tr("移动", "Move"), colors: .brown, size: 42) { showMove = true }
+                SpringButton(symbol: "trash.fill", label: tr("删除", "Delete"), colors: .gray, size: 42) {
                     let uids = model.currentUIDs
                     Task {
                         await model.list.delete(uids)
@@ -320,6 +357,7 @@ struct ConversationView: View {
 struct MessageCard: View {
     let item: ThreadItem
     let isLatest: Bool
+    let loading: Bool
     @Binding var expanded: Bool
     let folderBadge: String?
     let onCompose: (ComposeRequest.Mode) -> Void
@@ -386,7 +424,8 @@ struct MessageCard: View {
                             .font(RT.font(11))
                             .lineLimit(1)
                     } else {
-                        Text(item.parsed?.snippet ?? (item.failed ? tr("无法载入", "Couldn't load") : "…"))
+                        Text(item.parsed?.snippet ?? (item.failed ? tr("无法载入，点按重试", "Couldn't load — tap to retry")
+                                                      : loading ? tr("正在接收…", "Receiving…") : tr("点按展开", "Tap to expand")))
                             .font(RT.font(12))
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
@@ -444,17 +483,17 @@ struct MessageCard: View {
 
                 RetroDivider(dotted: true)
                 HStack(spacing: 8) {
-                    TileButton(symbol: "arrowshape.turn.up.left", label: tr("回复", "Reply"), size: 44) { onCompose(.reply) }
-                    TileButton(symbol: "arrowshape.turn.up.left.2", label: tr("全部", "All"), size: 44) { onCompose(.replyAll) }
-                    TileButton(symbol: "arrowshape.turn.up.right", label: tr("转发", "Fwd"), size: 44) { onCompose(.forward) }
-                    TileButton(symbol: "arrow.up.left.and.arrow.down.right", label: tr("全屏", "Full"), size: 44) { onFullscreen() }
+                    SpringButton(symbol: "arrowshape.turn.up.left.fill", label: tr("回复", "Reply"), colors: .blue, size: 32) { onCompose(.reply) }
+                    SpringButton(symbol: "arrowshape.turn.up.left.2.fill", label: tr("全部", "All"), colors: .indigo, size: 32) { onCompose(.replyAll) }
+                    SpringButton(symbol: "arrowshape.turn.up.right.fill", label: tr("转发", "Fwd"), colors: .purple, size: 32) { onCompose(.forward) }
+                    SpringButton(symbol: "arrow.up.left.and.arrow.down.right", label: tr("全屏", "Full"), colors: .teal, size: 32) { onFullscreen() }
                     Spacer(minLength: 0)
-                    TileButton(symbol: "trash", label: tr("删除", "Delete"), size: 44) { onDelete() }
+                    SpringButton(symbol: "trash.fill", label: tr("删除", "Delete"), colors: .gray, size: 32) { onDelete() }
                 }
                 .padding(10)
             }
-        } else if item.failed {
-            Text(tr("无法载入这封邮件", "Couldn't load this message"))
+        } else if item.failed && !loading {
+            Text(tr("无法载入这封邮件，收起后再点开可重试", "Couldn't load this message. Collapse and expand to retry."))
                 .font(RT.font(12))
                 .padding(12)
         } else {
