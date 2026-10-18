@@ -1,8 +1,23 @@
 import SwiftUI
 import UIKit
+import UserNotifications
+
+/// 应用在前台时也显示提醒（跟进事项到时间了）。
+final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        return true
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list, .sound])
+    }
+}
 
 @main
 struct RetroMailApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var settings = AppSettings.shared
 
@@ -13,6 +28,7 @@ struct RetroMailApp: App {
                 .environmentObject(settings)
                 .preferredColorScheme(settings.colorScheme)
                 .tint(Color.ink)
+                .task { await CacheArchive.autoRunIfNeeded() }
         }
         .onChange(of: scenePhase) { phase in
             if phase == .background {

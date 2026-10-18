@@ -7,8 +7,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "3.3"
-    CURRENT_PROJECT_VERSION: "7"
+    MARKETING_VERSION: "3.4"
+    CURRENT_PROJECT_VERSION: "8"
     SWIFT_STRICT_CONCURRENCY: minimal
 targets:
   RetroMail:
@@ -40,6 +40,9 @@ targets:
         NSCalendarsUsageDescription: 用于把邮件中的会议邀请添加到日历。
         NSCalendarsWriteOnlyAccessUsageDescription: 用于把邮件中的会议邀请添加到日历。
         NSCalendarsFullAccessUsageDescription: 用于把邮件中的会议邀请添加到日历。
+        NSRemindersUsageDescription: 用于把需要跟进的邮件添加到“提醒事项”。
+        NSRemindersFullAccessUsageDescription: 用于把需要跟进的邮件添加到“提醒事项”。
+        UIDesignRequiresCompatibility: true
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         ITSAppUsesNonExemptEncryption: false

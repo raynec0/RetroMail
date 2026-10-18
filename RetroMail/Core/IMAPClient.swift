@@ -252,6 +252,38 @@ final class IMAPConnection: @unchecked Sendable {
         return folders
     }
 
+    func createFolder(_ path: String) async throws {
+        try await run([.text("CREATE "), Self.astring(path)])
+        _ = try? await run([.text("SUBSCRIBE "), Self.astring(path)])
+    }
+
+    func renameFolder(_ path: String, to newPath: String) async throws {
+        if selected == path {
+            try await select("INBOX", force: true)
+        }
+        try await run([.text("RENAME "), Self.astring(path), .text(" "), Self.astring(newPath)])
+        _ = try? await run([.text("UNSUBSCRIBE "), Self.astring(path)])
+        _ = try? await run([.text("SUBSCRIBE "), Self.astring(newPath)])
+    }
+
+    func deleteFolder(_ path: String) async throws {
+        if selected == path {
+            try await select("INBOX", force: true)
+        }
+        _ = try? await run([.text("UNSUBSCRIBE "), Self.astring(path)])
+        try await run([.text("DELETE "), Self.astring(path)])
+    }
+
+    /// 服务器上加了旗标的邮件（最多 limit 封，新的在前）。
+    func searchFlagged(_ path: String, limit: Int) async throws -> [MessageSummary] {
+        try await select(path, force: true)
+        let r = try await run("UID SEARCH FLAGGED")
+        let uids = Array(Self.parseSearch(r.untagged).sorted().suffix(limit))
+        guard !uids.isEmpty else { return [] }
+        let f = try await run("UID FETCH \(Self.uidSet(uids)) \(Self.summaryItems)")
+        return Self.parseSummaries(f.untagged)
+    }
+
     func status(_ path: String) async throws -> (unseen: Int, uidNext: Int) {
         let r = try await run([.text("STATUS "), Self.astring(path), .text(" (UNSEEN UIDNEXT)")])
         for d in r.untagged {

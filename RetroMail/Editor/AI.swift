@@ -4,21 +4,80 @@ import UIKit
 // MARK: - 配置
 
 enum AIProvider: String, Codable, CaseIterable, Identifiable {
-    case openai, anthropic
+    case openai, anthropic, apple, handoff
     var id: String { rawValue }
 
     var label: String {
         switch self {
         case .openai: return tr("OpenAI 兼容", "OpenAI-compatible")
         case .anthropic: return "Anthropic"
+        case .apple: return tr("Apple 本机 AI", "Apple On-Device")
+        case .handoff: return tr("用我的订阅（AI App）", "My Subscription (AI App)")
         }
     }
+
+    var detail: String {
+        switch self {
+        case .openai: return tr("API Key，按量计费。DeepSeek、通义、Kimi、智谱、中转服务都可以。", "API key, pay as you go. Works with DeepSeek, Qwen, Kimi, relays…")
+        case .anthropic: return tr("Claude 的 API Key，按量计费。", "Claude API key, pay as you go.")
+        case .apple: return tr("iPhone 上的 Apple 智能模型，免费、离线、不上传邮件。需要 iOS 26 和支持 Apple 智能的机型。", "Apple Intelligence model on your iPhone: free, offline, private. Needs iOS 26 on a supported device.")
+        case .handoff: return tr("在 ChatGPT / Claude 等官方 App 里用你的订阅生成，回答再粘贴回来。不需要 API Key。", "Generates in the official ChatGPT / Claude app with your subscription, then pastes the answer back. No API key.")
+        }
+    }
+
+    var needsKey: Bool { self == .openai || self == .anthropic }
+}
+
+/// 用订阅时打开哪个官方 App。网址是官方的“通用链接”，装了 App 就会直接在 App 里打开。
+enum AIHandoffApp: String, Codable, CaseIterable, Identifiable {
+    case chatgpt, claude, gemini, deepseek, doubao, kimi
+    var id: String { rawValue }
+
+    var name: String {
+        switch self {
+        case .chatgpt: return "ChatGPT"
+        case .claude: return "Claude"
+        case .gemini: return "Gemini"
+        case .deepseek: return "DeepSeek"
+        case .doubao: return tr("豆包", "Doubao")
+        case .kimi: return "Kimi"
+        }
+    }
+
+    /// 能通过网址带上提示词的 App
+    func url(prompt: String) -> URL? {
+        let q = prompt.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&+=?#"))) ?? ""
+        let short = prompt.count <= 1800
+        switch self {
+        case .chatgpt: return URL(string: short ? "https://chatgpt.com/?q=" + q : "https://chatgpt.com/")
+        case .claude: return URL(string: short ? "https://claude.ai/new?q=" + q : "https://claude.ai/new")
+        case .gemini: return URL(string: "https://gemini.google.com/app")
+        case .deepseek: return URL(string: "https://chat.deepseek.com/")
+        case .doubao: return URL(string: "https://www.doubao.com/chat/")
+        case .kimi: return URL(string: "https://www.kimi.com/")
+        }
+    }
+
+    var prefills: Bool { self == .chatgpt || self == .claude }
 }
 
 struct AIConfig: Codable, Equatable {
     var provider: AIProvider = .openai
     var baseURL = ""
     var model = ""
+    /// 用订阅时打开的 App（新字段必须可选，旧设置才能正常读出）
+    var handoffApp: AIHandoffApp?
+
+    var app: AIHandoffApp { handoffApp ?? .chatgpt }
+
+    /// 设置页上显示的一行
+    var summary: String {
+        switch provider {
+        case .openai, .anthropic: return model
+        case .apple: return provider.label
+        case .handoff: return app.name + tr("（订阅）", " (subscription)")
+        }
+    }
 
     private static let key = "ai.config.v1"
     private static let secretKey = "ai.apikey"
@@ -44,7 +103,11 @@ struct AIConfig: Codable, Equatable {
 
     static var isConfigured: Bool {
         let c = load()
-        return !c.baseURL.isEmpty && !c.model.isEmpty && !apiKey.isEmpty
+        switch c.provider {
+        case .openai, .anthropic: return !c.baseURL.isEmpty && !c.model.isEmpty && !apiKey.isEmpty
+        case .apple: return AppleAI.availability == nil
+        case .handoff: return true
+        }
     }
 }
 
@@ -73,6 +136,8 @@ enum AIError: LocalizedError {
     case badURL
     case http(Int, String)
     case empty
+    case cancelled
+    case unavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -85,6 +150,10 @@ enum AIError: LocalizedError {
             return "HTTP \(code)：\(msg)"
         case .empty:
             return tr("AI 没有返回内容。", "The AI returned no content.")
+        case .cancelled:
+            return tr("已取消。", "Cancelled.")
+        case .unavailable(let why):
+            return why
         }
     }
 }
@@ -92,6 +161,14 @@ enum AIError: LocalizedError {
 enum AIClient {
     static func complete(system: String, user: String, maxTokens: Int = 2000,
                          config: AIConfig = AIConfig.load(), key: String = AIConfig.apiKey) async throws -> String {
+        switch config.provider {
+        case .apple:
+            return try clean(try await AppleAI.complete(system: system, user: user))
+        case .handoff:
+            return try clean(try await AIHandoff.shared.run(system: system, user: user, app: config.app))
+        case .openai, .anthropic:
+            break
+        }
         guard !key.isEmpty, !config.baseURL.isEmpty, !config.model.isEmpty else { throw AIError.notConfigured }
         var base = config.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         while base.hasSuffix("/") { base.removeLast() }
@@ -99,7 +176,7 @@ enum AIClient {
         let urlString: String
         var body: [String: Any]
         switch config.provider {
-        case .openai:
+        case .openai, .apple, .handoff:
             urlString = base.hasSuffix("/chat/completions") ? base : base + "/chat/completions"
             body = [
                 "model": config.model,
@@ -126,7 +203,7 @@ enum AIClient {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         switch config.provider {
-        case .openai:
+        case .openai, .apple, .handoff:
             req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         case .anthropic:
             req.setValue(key, forHTTPHeaderField: "x-api-key")
@@ -147,7 +224,7 @@ enum AIClient {
 
         var text = ""
         switch config.provider {
-        case .openai:
+        case .openai, .apple, .handoff:
             if let choices = json?["choices"] as? [[String: Any]],
                let msg = choices.first?["message"] as? [String: Any] {
                 if let s = msg["content"] as? String {
@@ -161,11 +238,17 @@ enum AIClient {
                 text = parts.filter { ($0["type"] as? String) == "text" }.compactMap { $0["text"] as? String }.joined()
             }
         }
-        text = text.replacingOccurrences(of: "<think>[\\s\\S]*?</think>", with: "", options: .regularExpression)
+        return try clean(text)
+    }
+
+    /// 去掉思考过程、代码块包裹等。
+    static func clean(_ raw: String) throws -> String {
+        var text = raw.replacingOccurrences(of: "<think>[\\s\\S]*?</think>", with: "", options: .regularExpression)
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.hasPrefix("```") {
             text = text.replacingOccurrences(of: "^```[a-zA-Z]*\\n?|\\n?```$", with: "", options: .regularExpression)
         }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw AIError.empty }
         return text
     }
@@ -388,11 +471,19 @@ struct AIWriterSheet: View {
                                     .disabled(busy)
                             }
                         }
+                        if ed.canShowWritingTools {
+                            Button(tr("Apple 写作工具…", "Apple Writing Tools…")) {
+                                dismiss()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { ed.showWritingTools() }
+                            }
+                            .buttonStyle(RetroButtonStyle(compact: true))
+                        }
                     }
                     .padding(.vertical, 4)
                     if busy {
                         RetroBusy(text: tr("AI 正在思考…", "Thinking…"))
                     }
+                    AIHandoffBanner()
                     if !result.isEmpty {
                         RetroGroup(tr("结果", "Result")) {
                             Text(result)
@@ -411,6 +502,7 @@ struct AIWriterSheet: View {
         }
         .retroAlert($error)
         .presentationDetents([.large])
+        .onDisappear { AIHandoff.shared.cancel() }
     }
 
     @ViewBuilder
@@ -477,6 +569,8 @@ struct AIWriterSheet: View {
                     system: AIPrompts.system(tone: tone, lang: effectiveLang),
                     user: AIPrompts.user(action: action, instructions: instructions, source: String(source.prefix(12000)),
                                          context: context, senderName: sender))
+            } catch AIError.cancelled {
+                // 用户取消
             } catch {
                 self.error = error.localizedDescription
             }
@@ -502,6 +596,7 @@ struct AISummarySheet: View {
                     if busy {
                         RetroBusy(text: tr("AI 正在阅读邮件…", "Reading the thread…"))
                     }
+                    AIHandoffBanner()
                     if !summary.isEmpty {
                         RetroGroup(tr("总结", "Summary")) {
                             Text(summary)
@@ -532,6 +627,7 @@ struct AISummarySheet: View {
         .retroAlert($error)
         .retroSheetStyle()
         .task { if summary.isEmpty { summarize() } }
+        .onDisappear { AIHandoff.shared.cancel() }
     }
 
     private var langLine: String {
@@ -556,6 +652,8 @@ struct AISummarySheet: View {
                     Thread:
                     \(threadText)
                     """)
+            } catch AIError.cancelled {
+                // 用户取消
             } catch {
                 self.error = error.localizedDescription
             }
@@ -572,6 +670,8 @@ struct AISummarySheet: View {
                     system: AIPrompts.system(tone: .formal, lang: .auto),
                     user: AIPrompts.user(action: .reply, instructions: replyInstructions, source: "", context: threadText, senderName: sender))
                 onDraftReply(text)
+            } catch AIError.cancelled {
+                // 用户取消
             } catch {
                 self.error = error.localizedDescription
             }
@@ -592,39 +692,41 @@ struct AISettingsSheet: View {
         RetroPanel(tr("AI 助手", "AI Assistant")) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(tr("使用你自己的 API Key（按量计费）。出于账号安全，不支持用 ChatGPT / Claude 等网页订阅的登录令牌，服务商条款也不允许第三方应用这样使用。",
-                            "Uses your own API key (pay-as-you-go). Web-subscription login tokens (ChatGPT / Claude apps) aren't supported — providers' terms don't allow third-party apps to use them."))
-                        .font(RT.font(11))
-                        .fixedSize(horizontal: false, vertical: true)
-                    RetroGroup(tr("服务", "Service")) {
-                        HStack {
-                            Spacer().frame(width: 86)
-                            Menu {
-                                ForEach(AIPreset.all) { p in
-                                    Button(p.name) {
-                                        config.provider = p.provider
-                                        config.baseURL = p.baseURL
-                                        if !p.model.isEmpty { config.model = p.model }
+                    RetroGroup(tr("用什么来生成", "Where AI runs")) {
+                        ForEach(AIProvider.allCases) { p in
+                            Button { config.provider = p } label: {
+                                HStack(alignment: .top, spacing: 10) {
+                                    ZStack {
+                                        Circle().stroke(config.provider == p ? IOS3.dateBlue : IOS3.chevron, lineWidth: 2)
+                                        if config.provider == p { Circle().fill(IOS3.dateBlue).padding(5) }
                                     }
+                                    .frame(width: 20, height: 20)
+                                    .padding(.top, 2)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(p.label).font(RT.font(15, .bold))
+                                        Text(p.detail).font(RT.font(12)).foregroundColor(IOS3.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    Spacer(minLength: 0)
                                 }
-                            } label: {
-                                Text(tr("套用常见服务 ▾", "Presets ▾")).font(RT.font(12, .bold))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
                         }
-                        RetroRadio(label: tr("接口类型", "API Type"), options: AIProvider.allCases.map { ($0, $0.label) }, selection: $config.provider)
-                        RetroField(label: tr("服务地址", "Base URL"), text: $config.baseURL, placeholder: "https://api.example.com/v1", keyboard: .URL)
-                        RetroField(label: tr("模型", "Model"), text: $config.model, placeholder: tr("服务商文档中的模型名", "Model name from provider docs"))
-                        RetroField(label: "API Key", text: $key, placeholder: "sk-…", secure: true)
-                        Text(tr("国内中转服务（OpenAI 兼容格式）也可以用：选“OpenAI 兼容”，填中转地址和 Key 即可。模型名以服务商文档为准。",
-                                "Relay services with an OpenAI-compatible API work too: choose OpenAI-compatible and enter the relay URL and key. Check model names in your provider's docs."))
-                            .font(RT.font(10))
-                            .opacity(0.7)
-                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    switch config.provider {
+                    case .openai, .anthropic: apiGroup
+                    case .apple: appleGroup
+                    case .handoff: handoffGroup
                     }
                     HStack(spacing: 12) {
                         Spacer()
-                        Button(tr("测试", "Test")) { test() }
-                            .buttonStyle(RetroButtonStyle())
+                        if config.provider != .handoff {
+                            Button(tr("测试", "Test")) { test() }
+                                .buttonStyle(RetroButtonStyle())
+                        }
                         Button(tr("存储", "Save")) {
                             save()
                             dismiss()
@@ -639,6 +741,79 @@ struct AISettingsSheet: View {
         .busyOverlay(testing, tr("正在测试…", "Testing…"))
         .retroAlert($message)
         .presentationDetents([.large])
+    }
+
+    private var apiGroup: some View {
+        RetroGroup(tr("服务", "Service")) {
+            HStack {
+                Spacer().frame(width: 86)
+                Menu {
+                    ForEach(AIPreset.all) { p in
+                        Button(p.name) {
+                            config.provider = p.provider
+                            config.baseURL = p.baseURL
+                            if !p.model.isEmpty { config.model = p.model }
+                        }
+                    }
+                } label: {
+                    Text(tr("套用常见服务 ▾", "Presets ▾")).font(RT.font(12, .bold))
+                }
+            }
+            RetroField(label: tr("服务地址", "Base URL"), text: $config.baseURL, placeholder: "https://api.example.com/v1", keyboard: .URL)
+            RetroField(label: tr("模型", "Model"), text: $config.model, placeholder: tr("服务商文档中的模型名", "Model name from provider docs"))
+            RetroField(label: "API Key", text: $key, placeholder: "sk-…", secure: true)
+            Text(tr("国内中转服务（OpenAI 兼容格式）也可以用：选“OpenAI 兼容”，填中转地址和 Key 即可。模型名以服务商文档为准。",
+                    "Relay services with an OpenAI-compatible API work too: choose OpenAI-compatible and enter the relay URL and key. Check model names in your provider's docs."))
+                .font(RT.font(10))
+                .opacity(0.7)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var appleGroup: some View {
+        RetroGroup(tr("Apple 本机 AI", "Apple On-Device AI")) {
+            Text(AppleAI.availability ?? tr("✓ 这台 iPhone 可以使用。邮件内容只在手机上处理。", "✓ Available on this iPhone. Mail is processed on the device only."))
+                .font(RT.font(13))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
+            Text(tr("本机模型比较小，适合润色、改语气、总结、短回复；长文写作和翻译质量不如云端大模型。",
+                    "The on-device model is small: great for polishing, tone, recaps and short replies; long writing and translation are better with a cloud model."))
+                .font(RT.font(11))
+                .opacity(0.75)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
+        }
+    }
+
+    private var handoffGroup: some View {
+        RetroGroup(tr("用哪个 App", "Which app")) {
+            IOS3Segmented(options: [AIHandoffApp.chatgpt, .claude, .gemini].map { ($0, $0.name) },
+                          selection: Binding(get: { config.app }, set: { config.handoffApp = $0 }))
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+            IOS3Segmented(options: [AIHandoffApp.deepseek, .doubao, .kimi].map { ($0, $0.name) },
+                          selection: Binding(get: { config.app }, set: { config.handoffApp = $0 }))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
+            Text(tr("""
+            用法：点 AI 功能后会自动打开 \(config.app.name)，提示词已经填好（或已复制，粘贴即可）。它回答完后，复制回答，回到 RetroMail 点“粘贴回答”，结果就会放进邮件里。
+
+            这样用的是你在官方 App 里登录的订阅，RetroMail 不保存也不接触你的账号或登录令牌。ChatGPT、Claude 等服务商不允许第三方应用直接使用订阅账号的令牌调用模型（有封号风险），所以这里采用“交给官方 App 生成”的方式。
+            """, """
+            How it works: tapping an AI action opens \(config.app.name) with the prompt filled in (or copied — just paste). When it answers, copy the reply, return to RetroMail and tap Paste Answer.
+
+            This uses the subscription you're signed into in the official app. RetroMail never stores or touches your account or tokens — providers don't allow third-party apps to call models with subscription tokens (accounts can be banned), so the work is handed to the official app instead.
+            """))
+                .font(RT.font(12))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
+            Text(tr("另外：iOS 18.2 以上、开启 Apple 智能并在设置里登录了 ChatGPT 的话，写信时选中文字 → “写作工具”，也能直接用你的 ChatGPT 账号改写和撰写。",
+                    "Also: on iOS 18.2+ with Apple Intelligence and ChatGPT signed in under Settings, select text while writing → Writing Tools to rewrite or compose with your ChatGPT account."))
+                .font(RT.font(11))
+                .opacity(0.75)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
+        }
     }
 
     private func save() {

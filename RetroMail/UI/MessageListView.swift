@@ -21,7 +21,8 @@ final class MessageListModel: ObservableObject {
     /// 服务器上这个邮箱的邮件总数
     @Published var total = 0
     @Published private(set) var loadingMore = false
-    private var previewTask: Task<Void, Never>?
+    private var previewTasks: [Task<Void, Never>] = []
+    private var previewRequested: Set<Int> = []
     private var didInitialLoad = false
 
     init(account: MailAccount, folder: MailFolder) {
@@ -45,6 +46,8 @@ final class MessageListModel: ObservableObject {
         guard !didInitialLoad else { return }
         didInitialLoad = true
         messages = DiskCache.loadList(account: account.id, folder: folder.path).sorted(by: MessageSummary.newestFirst)
+        // 缓存里已有的邮件马上开始补预览，不用等列表刷新完
+        loadPreviews()
         await refresh()
     }
 
@@ -104,47 +107,85 @@ final class MessageListModel: ObservableObject {
         }
     }
 
-    /// 在“列表”连接上补取正文预览（每封只取前 1.5 KB），分批更新列表。
-    /// 这条连接在列表刷新后是空闲的，不会排在未读数查询后面。
+    /// 补取正文预览（每封只取前 1.5 KB）。
+    /// 屏幕上最先看到的十几封走“交互”连接（已经连好、空闲），小批量先出结果；
+    /// 其余的走“列表”连接在后面慢慢补。已经在取的不会重复请求，刷新列表也不会打断。
     func loadPreviews() {
-        guard messages.contains(where: { $0.preview == nil }) else { return }
-        previewTask?.cancel()
-        let path = folder.path
+        let missing = messages.filter { $0.preview == nil && !previewRequested.contains($0.uid) }
+        guard !missing.isEmpty else { return }
+        for m in missing { previewRequested.insert(m.uid) }
+        let first = Array(missing.prefix(14))
+        let rest = Array(missing.dropFirst(14))
         let acc = account
-        previewTask = Task { [weak self] in
-            guard let self = self else { return }
-            let missing = self.messages.filter { $0.preview == nil }
-            let bg = MailCenter.shared.client(for: acc, .sync)
-            for start in stride(from: 0, to: missing.count, by: 20) {
-                if Task.isCancelled { return }
-                let batch = Array(missing[start..<min(start + 20, missing.count)])
-                guard let raw = try? await bg.perform({ try await $0.fetchPreviews(path, uids: batch.map(\.uid)) }) else { continue }
-                let info = Dictionary(uniqueKeysWithValues: batch.map { ($0.uid, ($0.contentType, $0.transferEncoding)) })
-                let texts = await Task.detached { () -> [Int: String] in
-                    var out: [Int: String] = [:]
-                    for (uid, data) in raw {
-                        let meta = info[uid]
-                        out[uid] = PreviewText.extract(data, contentType: meta?.0 ?? nil, transferEncoding: meta?.1 ?? nil)
-                    }
-                    return out
-                }.value
-                if Task.isCancelled { return }
-                var updated = self.messages
-                for i in updated.indices where updated[i].preview == nil {
-                    if let t = texts[updated[i].uid] {
-                        updated[i].preview = t
-                    } else if batch.contains(where: { $0.uid == updated[i].uid }) {
-                        updated[i].preview = ""
-                    }
+        let path = folder.path
+        let fast = MailCenter.shared.client(for: acc, .interactive)
+        let slow = MailCenter.shared.client(for: acc, .sync)
+        previewTasks.append(Task { [weak self] in
+            // 第一批只取 6 封，尽快让最上面几行出预览
+            await self?.fetchPreviewBatches(first, sizes: [6, 8], client: fast, path: path)
+        })
+        if !rest.isEmpty {
+            previewTasks.append(Task { [weak self] in
+                await self?.fetchPreviewBatches(rest, sizes: [25], client: slow, path: path)
+                if let self = self {
+                    DiskCache.saveList(Array(self.messages.prefix(120)), account: acc.id, folder: path)
                 }
-                self.messages = updated
+            })
+        }
+    }
+
+    private func fetchPreviewBatches(_ list: [MessageSummary], sizes: [Int], client: IMAPClient, path: String) async {
+        var start = 0
+        var round = 0
+        while start < list.count {
+            if Task.isCancelled { break }
+            let size = sizes[min(round, sizes.count - 1)]
+            let batch = Array(list[start..<min(start + size, list.count)])
+            start += size
+            round += 1
+            guard let raw = try? await client.perform({ try await $0.fetchPreviews(path, uids: batch.map(\.uid)) }) else {
+                // 失败的留给下次（重新进入或刷新时再取）
+                for m in batch { previewRequested.remove(m.uid) }
+                continue
             }
-            DiskCache.saveList(Array(self.messages.prefix(120)), account: acc.id, folder: path)
+            let info = Dictionary(uniqueKeysWithValues: batch.map { ($0.uid, ($0.contentType, $0.transferEncoding)) })
+            let texts = await Task.detached { () -> [Int: String] in
+                var out: [Int: String] = [:]
+                for (uid, data) in raw {
+                    let meta = info[uid]
+                    out[uid] = PreviewText.extract(data, contentType: meta?.0 ?? nil, transferEncoding: meta?.1 ?? nil)
+                }
+                return out
+            }.value
+            applyPreviews(texts, batch: Set(batch.map(\.uid)))
+        }
+        if !Task.isCancelled {
+            DiskCache.saveList(Array(messages.prefix(120)), account: account.id, folder: path)
+        }
+    }
+
+    private func applyPreviews(_ texts: [Int: String], batch: Set<Int>) {
+        var updated = messages
+        var changed = false
+        for i in updated.indices where updated[i].preview == nil && batch.contains(updated[i].uid) {
+            updated[i].preview = texts[updated[i].uid] ?? ""
+            changed = true
+        }
+        if changed { messages = updated }
+        if var r = searchResults {
+            var rc = false
+            for i in r.indices where r[i].preview == nil && batch.contains(r[i].uid) {
+                r[i].preview = texts[r[i].uid] ?? ""
+                rc = true
+            }
+            if rc { searchResults = r }
         }
     }
 
     func stopPreviews() {
-        previewTask?.cancel()
+        previewTasks.forEach { $0.cancel() }
+        previewTasks = []
+        previewRequested = []
     }
 
     func search() async {
@@ -234,6 +275,7 @@ struct MessageListView: View {
     let folder: MailFolder
     @StateObject private var model: MessageListModel
     @ObservedObject private var center = MailCenter.shared
+    @ObservedObject private var followUps = FollowUpStore.shared
     @EnvironmentObject private var settings: AppSettings
     @State private var openConversation: Conversation?
     @State private var selecting = false
@@ -387,7 +429,8 @@ struct MessageListView: View {
             }
         } label: {
             ConversationRow(conversation: c, selecting: selecting, selected: isSelected,
-                            showRecipients: showRecipients, threaded: settings.threaded, myEmail: account.email)
+                            showRecipients: showRecipients, threaded: settings.threaded, myEmail: account.email,
+                            followUp: followUps.item(account: account.id, folder: model.folder.path, summary: c.latest))
         }
         .buttonStyle(InvertOnPressStyle())
         .listRowInsets(EdgeInsets())
@@ -506,6 +549,7 @@ struct ConversationRow: View {
     var showRecipients: Bool
     var threaded: Bool
     var myEmail: String = ""
+    var followUp: FollowUp? = nil
     @Environment(\.rowPressed) private var pressed
 
     private func name(_ a: MailAddress) -> String {
@@ -561,8 +605,17 @@ struct ConversationRow: View {
                 } else {
                     Color.clear.frame(width: 12, height: 12)
                 }
-                if conversation.flagged {
-                    Image(systemName: "flag.fill").font(.system(size: 10)).foregroundColor(pressed ? .white : HexColor.color("#E8740C"))
+                if let fu = followUp, !fu.done {
+                    if fu.flagged {
+                        Image(fu.flagColor.asset).resizable().interpolation(.high).frame(width: 14, height: 14)
+                    }
+                    if fu.isOverdue {
+                        Text("!").font(RT.font(13, .bold)).foregroundColor(HexColor.color("#C0281C"))
+                    } else if fu.deadline != nil || fu.reminder != nil {
+                        Image("fu-clock").resizable().interpolation(.high).frame(width: 13, height: 13)
+                    }
+                } else if conversation.flagged {
+                    Image("fu-flag").resizable().interpolation(.high).frame(width: 14, height: 14)
                 }
             }
             .frame(width: 28)

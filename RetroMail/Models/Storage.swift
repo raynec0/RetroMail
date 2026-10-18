@@ -149,7 +149,15 @@ enum DiskCache {
     }
 
     static func loadRaw(account: UUID, folder: String, uid: Int) -> Data? {
-        try? Data(contentsOf: dir(account).appendingPathComponent(fileName(["raw", folder, String(uid)])))
+        let name = fileName(["raw", folder, String(uid)])
+        let url = dir(account).appendingPathComponent(name)
+        if let d = try? Data(contentsOf: url) {
+            // 记下最近一次打开的时间，自动转存只挑很久没看的邮件
+            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+            return d
+        }
+        // 已转存到 iCloud / “文件”的存档里
+        return CacheArchive.load(account: account, name: name)
     }
 
     static func removeAccount(_ account: UUID) {

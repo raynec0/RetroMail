@@ -84,6 +84,23 @@ final class ConversationModel: ObservableObject {
         }
     }
 
+    /// 旗标：本地立即更新，再同步到服务器。
+    func setFlag(_ item: ThreadItem, _ on: Bool) {
+        if let i = items.firstIndex(where: { $0.id == item.id }) {
+            items[i].summary.set("\\Flagged", on)
+        }
+        if item.folder == currentFolder {
+            let list = self.list
+            let uid = item.summary.uid
+            Task { await list.setFlagged([uid], on) }
+        } else {
+            let folder = item.folder
+            let uid = item.summary.uid
+            let c = MailCenter.shared.client(for: account, .interactive)
+            Task { _ = try? await c.perform { try await $0.store(folder, uids: [uid], flag: "\\Flagged", add: on) } }
+        }
+    }
+
     /// 离开页面时停止后台下载。
     func stop() {
         backgroundWork?.cancel()
@@ -215,6 +232,8 @@ struct ConversationView: View {
     @State private var showDelete = false
     @State private var cardActionsFor: ThreadItem?
     @State private var invite: MailAttachment?
+    @State private var followUp: (FollowUp, ThreadItem)?
+    @ObservedObject private var followUps = FollowUpStore.shared
     @Environment(\.dismiss) private var dismiss
 
     init(list: MessageListModel, conversation: Conversation,
@@ -322,6 +341,13 @@ struct ConversationView: View {
                 }
             }
             .preferredColorScheme(settings.colorScheme)
+        }
+        .sheet(isPresented: Binding(get: { followUp != nil }, set: { if !$0 { followUp = nil } })) {
+            if let pair = followUp {
+                FollowUpEditor(item: pair.0) { on in model.setFlag(pair.1, on) }
+                    .environmentObject(settings)
+                    .preferredColorScheme(settings.colorScheme)
+            }
         }
         .sheet(isPresented: $showSummary) {
             AISummarySheet(threadText: model.threadText) { draft in
@@ -433,6 +459,8 @@ struct ConversationView: View {
                     if on { Task { await model.fetch(item.id) } }
                 }),
             folderBadge: item.folder == model.currentFolder ? nil : model.folderName(item.folder),
+            followUp: followUps.item(account: model.account.id, folder: item.folder, summary: item.summary),
+            onFollowUp: { followUp = (newFollowUp(item), item) },
             onCompose: { mode in startCompose(mode, item: item) },
             onActions: { cardActionsFor = item },
             onInvite: { invite = $0 },
@@ -458,6 +486,11 @@ struct ConversationView: View {
             list.append(SheetAction(tr("转发", "Forward")) { startCompose(.forward, item: item) })
         }
         if let it = item {
+            let existing = followUps.item(account: model.account.id, folder: it.folder, summary: it.summary)
+            list.append(SheetAction(existing == nil ? tr("跟进…（旗标 / 提醒 / 截止 / 备注）", "Follow Up… (Flag / Remind / Due / Note)")
+                                                    : tr("编辑跟进…", "Edit Follow-up…")) { openFollowUp(it) })
+            let flaggedNow = existing?.flagged ?? it.summary.flagged
+            list.append(SheetAction(flaggedNow ? tr("取消旗标", "Unflag") : tr("加旗标", "Flag")) { quickFlag(it, !flaggedNow) })
             list.append(SheetAction(tr("全屏查看", "View Full Screen")) { fullscreen = it })
             if it.folder == model.currentFolder {
                 list.append(SheetAction(tr("标为未读", "Mark as Unread")) {
@@ -474,6 +507,25 @@ struct ConversationView: View {
             list.append(SheetAction(tr("AI 总结会话", "AI Recap of Thread")) { showSummary = true })
         }
         return list
+    }
+
+    private func newFollowUp(_ it: ThreadItem) -> FollowUp {
+        let a = model.account
+        return followUps.item(account: a.id, folder: it.folder, summary: it.summary)
+            ?? FollowUp(id: FollowUp.makeId(account: a.id, folder: it.folder, summary: it.summary),
+                        accountId: a.id, folder: it.folder, summary: it.summary)
+    }
+
+    private func openFollowUp(_ it: ThreadItem) {
+        // 动作表收起后再弹出编辑页
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { followUp = (newFollowUp(it), it) }
+    }
+
+    private func quickFlag(_ it: ThreadItem, _ on: Bool) {
+        var f = newFollowUp(it)
+        f.flagged = on
+        followUps.save(f)
+        model.setFlag(it, on)
     }
 
     private var toolbar: some View {
@@ -525,6 +577,8 @@ struct MessageCard: View {
     let loading: Bool
     @Binding var expanded: Bool
     let folderBadge: String?
+    var followUp: FollowUp?
+    var onFollowUp: (() -> Void)?
     let onCompose: (ComposeRequest.Mode) -> Void
     let onActions: () -> Void
     let onInvite: (MailAttachment) -> Void
@@ -591,6 +645,11 @@ struct MessageCard: View {
                                 .background(Capsule().fill(IOS3.pill))
                         }
                         Spacer(minLength: 4)
+                        if let fu = followUp, fu.flagged {
+                            Image(fu.flagColor.asset).resizable().interpolation(.high).frame(width: 15, height: 15)
+                        } else if followUp == nil && item.summary.flagged {
+                            Image("fu-flag").resizable().interpolation(.high).frame(width: 15, height: 15)
+                        }
                         if item.summary.hasAttachment {
                             Image(systemName: "paperclip").font(.system(size: 11, weight: .semibold)).foregroundColor(IOS3.secondary)
                         }
@@ -672,8 +731,39 @@ struct MessageCard: View {
     // MARK: 展开内容
 
     @ViewBuilder
+    private var followUpStrip: some View {
+        if let fu = followUp, !fu.done, fu.deadline != nil || fu.reminder != nil || !fu.note.isEmpty {
+            Button(action: onFollowUp ?? onActions) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        if let d = fu.deadline {
+                            Text(tr("截止 ", "Due ") + Fmt.compact(d))
+                                .font(RT.font(12, .bold))
+                                .foregroundColor(d < Date() ? HexColor.color("#C0281C") : HexColor.color("#7A5A00"))
+                        }
+                        if let r = fu.reminder {
+                            Text("⏰ " + Fmt.compact(r)).font(RT.font(12, .bold)).foregroundColor(HexColor.color("#7A5A00"))
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    if !fu.note.isEmpty {
+                        Text(fu.note).font(RT.font(13)).foregroundColor(HexColor.color("#5A4A00")).lineLimit(3)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(HexColor.color("#FFF4A8"))
+                .overlay(alignment: .bottom) { Rectangle().fill(HexColor.color("#E2CF5A")).frame(height: 1) }
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    @ViewBuilder
     private var expandedView: some View {
         VStack(alignment: .leading, spacing: 0) {
+            followUpStrip
             detailsBlock
             Rectangle().fill(IOS3.separator).frame(height: 1)
             if let d = item.display {

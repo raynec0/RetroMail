@@ -82,6 +82,49 @@ final class MailCenter: ObservableObject {
         }
     }
 
+    // MARK: - 文件夹管理
+
+    /// 账户的层级分隔符（新建子文件夹时用）。
+    func delimiter(_ a: MailAccount) -> String {
+        folders[a.id]?.compactMap(\.delimiter).first { !$0.isEmpty } ?? "/"
+    }
+
+    /// 由上级文件夹和显示名拼出服务器上的路径（名称转成 IMAP UTF-7）。
+    func path(for name: String, parent: MailFolder?, account a: MailAccount) -> String {
+        let leaf = IMAPUTF7.encode(name.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard let p = parent else { return leaf }
+        return p.path + delimiter(a) + leaf
+    }
+
+    func createFolder(_ a: MailAccount, path: String) async throws {
+        try await client(for: a, .interactive).perform { try await $0.createFolder(path) }
+        await loadFolders(a)
+    }
+
+    func renameFolder(_ a: MailAccount, from old: String, to new: String) async throws {
+        try await client(for: a, .interactive).perform { try await $0.renameFolder(old, to: new) }
+        // 其他连接可能还选着旧文件夹，重连一下更稳妥
+        for lane in [Lane.sync, .background] {
+            if let c = clients.removeValue(forKey: a.id.uuidString + "|" + lane.rawValue) {
+                Task { await c.shutdown() }
+            }
+        }
+        AppSettings.shared.moveFolderIcon(account: a.id, from: old, to: new)
+        await loadFolders(a)
+    }
+
+    func deleteFolder(_ a: MailAccount, path: String) async throws {
+        for lane in [Lane.sync, .background] {
+            if let c = clients.removeValue(forKey: a.id.uuidString + "|" + lane.rawValue) {
+                Task { await c.shutdown() }
+            }
+        }
+        try await client(for: a, .interactive).perform { try await $0.deleteFolder(path) }
+        AppSettings.shared.setFolderIcon(nil, account: a.id, path: path)
+        unread[unreadKey(a.id, path)] = nil
+        await loadFolders(a)
+    }
+
     func refreshUnread(_ a: MailAccount, paths: [String]? = nil) async {
         guard let list = folders[a.id] else { return }
         let c = client(for: a, .background)

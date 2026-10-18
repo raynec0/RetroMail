@@ -1,4 +1,19 @@
-# RetroMail 3.3：iPhone OS 3 风格的邮件客户端
+# RetroMail 3.4：iPhone OS 3 风格的邮件客户端
+
+## 3.4 更新
+
+- **邮箱文件夹管理**：首页每个账户右侧有“编辑”。进入编辑后点任意邮箱可以改名、移动到别的文件夹下、换图标、删除；最下面有“新建邮箱”。长按邮箱按钮也能“编辑邮箱 / 新建子邮箱”。新建、改名、删除直接在服务器上进行。
+- **更多邮箱图标**：图标库扩充到 50 多个（彩色文件夹、带标志的文件夹、日历、联系人、文档、表格、工程、地球、服务器……），全部来自 Oxygen / Tango 图标集，可在编辑页里挑选，也可以恢复“自动”。
+- **跟进事项**：邮件卡片“更多”里有“跟进…”和“加旗标”。可以设置旗标颜色、优先级、提醒时间（到时推送通知）、截止日期、备注，还能一键加到 iOS“提醒事项”。首页顶部的“跟进事项”汇总所有事项，按“已逾期 / 今天 / 明天 / 7 天内 / 以后”分组，可勾选完成，点一下打开邮件。“导入旗标”可以把在电脑或网页上加了旗标的邮件也拿进来。列表和会话里会显示旗标、截止时间和备注。
+- **离线缓存转存到 iCloud**：设置 → 存储 → 离线缓存与 iCloud 存档。选一个 iCloud 云盘里的文件夹，就可以把下载过的邮件原文和附件转存过去，腾出手机空间；可以只转存 7 / 30 / 90 天前的，也可以设置自动转存。转存过的邮件照样能打开（先从存档读取，读不到再从服务器下载）。
+- **列表预览加载更快**：进入文件夹时，缓存里的邮件立刻开始补预览，不再等列表刷新完；屏幕上最上面的十几封走已经连好的快速连接，小批量先出结果，其余在另一条连接上补。
+- **AI 助手新增两种方式**：
+  - **用我的订阅（AI App）**：在 ChatGPT、Claude、Gemini、DeepSeek、豆包、Kimi 的官方 App 里用你自己的订阅生成，回答复制后回来点“粘贴回答”即可，不需要 API Key。
+  - **Apple 本机 AI**：iOS 26 + 支持 Apple 智能的 iPhone 上可以用，免费、离线，邮件不出手机。
+  - 写信时还可以用 iOS 18.2 的“写作工具”（如果在系统设置里登录了 ChatGPT，用的就是你的 ChatGPT 账号）。
+
+> 关于“用订阅”：ChatGPT、Claude 等服务商不允许第三方应用拿订阅账号的登录令牌直接调用模型（有封号风险），所以 RetroMail 不保存、不接触你的账号或令牌，而是交给你手机上已登录的官方 App 去生成。
+
 
 ## 3.3 更新
 
@@ -86,7 +101,8 @@ AI 功能使用你自己的 API Key，按用量计费。ChatGPT、Claude 等**�
 ## 更新到你的 GitHub 仓库
 
 1. 解压压缩包，把 `RetroMail` 文件夹**里面的全部内容**重新上传到仓库根目录，覆盖旧文件。网页上传：**Add file → Upload files**，拖入后提交。
-   这次新增了 `RetroMail/App/AppSettings.swift`、`RetroMail/Editor/` 整个文件夹和 `RetroMail/UI/ConversationView.swift`，请确认都传上去了。
+   3.4 新增了这些文件，请确认都传上去了：`RetroMail/Models/FollowUp.swift`、`RetroMail/Models/CacheArchive.swift`、`RetroMail/UI/FolderEditView.swift`、`RetroMail/UI/FollowUpViews.swift`、`RetroMail/UI/CacheSettingsView.swift`、`RetroMail/Editor/AIProviders.swift`，以及 `Assets.xcassets` 里新的 `mbx-*`、`fu-*` 图标文件夹。
+   `.github/workflows/build.yml` 也更新了（有 Xcode 26 时用 Xcode 26 编译，Apple 本机 AI 需要它）。没更新这个文件也能正常编译，只是 Apple 本机 AI 会显示不可用。
 2. 提交后会自动编译。完成后在 **Actions → 最新一次运行 → Artifacts** 里下载 `RetroMail-ipa`。
 3. 用自签工具安装。Bundle ID 没变，会覆盖安装，账户设置会保留。
 

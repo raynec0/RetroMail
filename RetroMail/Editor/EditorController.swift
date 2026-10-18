@@ -116,6 +116,21 @@ final class EditorController: NSObject, ObservableObject, WKScriptMessageHandler
         await eval("RE.\(fn)(\(args.map(Self.js).joined(separator: ",")))")
     }
 
+    /// iOS 18.2+：打开 Apple“写作工具”（作用于当前选中的文字）。
+    var canShowWritingTools: Bool {
+        guard let wv = webView else { return false }
+        return wv.responds(to: NSSelectorFromString("showWritingTools:"))
+    }
+
+    func showWritingTools() {
+        guard let wv = webView else { return }
+        let sel = NSSelectorFromString("showWritingTools:")
+        if wv.responds(to: sel) {
+            wv.becomeFirstResponder()
+            wv.perform(sel, with: nil)
+        }
+    }
+
     func html() async -> String { (await eval("RE.html()") as? String) ?? "" }
     func text() async -> String { (await eval("RE.text()") as? String) ?? "" }
     func bodyText() async -> String { (await eval("RE.bodyText()") as? String) ?? "" }
@@ -190,6 +205,12 @@ struct RichEditorView: UIViewRepresentable {
         for name in ["state", "ready", "focus", "changed"] {
             ucc.add(handler, name: name)
         }
+        #if compiler(>=6.0)
+        if #available(iOS 18.0, *) {
+            // 选中文字后可以用 Apple 的“写作工具”（含已登录的 ChatGPT）
+            cfg.writingToolsBehavior = .complete
+        }
+        #endif
         let wv = WKWebView(frame: .zero, configuration: cfg)
         wv.overrideUserInterfaceStyle = .light
         wv.isOpaque = true

@@ -30,6 +30,7 @@ final class AppSettings: ObservableObject {
     private static let threadedKey = "app.threaded"
     private static let hideQuotesKey = "app.hideQuotes"
     private static let mailboxIconsKey = "app.mailboxIcons"
+    private static let folderIconsKey = "app.folderIcons"
 
     @Published var appearance: Appearance {
         didSet { UserDefaults.standard.set(appearance.rawValue, forKey: Self.appearanceKey) }
@@ -54,8 +55,35 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(mailboxIcons, forKey: Self.mailboxIconsKey) }
     }
 
+    /// 用户为文件夹挑选的图标：键为“账户ID|文件夹路径”，值为图标资源名
+    @Published var folderIcons: [String: String] {
+        didSet { UserDefaults.standard.set(folderIcons, forKey: Self.folderIconsKey) }
+    }
+
+    func folderIcon(account: UUID, path: String) -> String? {
+        folderIcons[account.uuidString + "|" + path]
+    }
+
+    func setFolderIcon(_ name: String?, account: UUID, path: String) {
+        folderIcons[account.uuidString + "|" + path] = name
+    }
+
+    func moveFolderIcon(account: UUID, from old: String, to new: String) {
+        let prefix = account.uuidString + "|"
+        var next = folderIcons
+        for (k, v) in folderIcons where k.hasPrefix(prefix) {
+            let p = String(k.dropFirst(prefix.count))
+            if p == old || p.hasPrefix(old) && p.count > old.count {
+                next[k] = nil
+                next[prefix + new + p.dropFirst(old.count)] = v
+            }
+        }
+        folderIcons = next
+    }
+
     private init() {
         let d = UserDefaults.standard
+        folderIcons = d.dictionary(forKey: Self.folderIconsKey) as? [String: String] ?? [:]
         appearance = Appearance(rawValue: d.string(forKey: Self.appearanceKey) ?? "") ?? .system
         if let raw = d.string(forKey: Self.languageKey), let l = AppLanguage(rawValue: raw) {
             language = l

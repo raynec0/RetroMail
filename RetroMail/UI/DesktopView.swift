@@ -4,6 +4,9 @@ enum Route: Hashable {
     case folder(MailAccount, MailFolder)
     case account(MailAccount?)
     case settings
+    case folderEdit(MailAccount, MailFolder?, parent: MailFolder?)
+    case followUps
+    case followUpMessage(String)
 }
 
 extension FolderRole {
@@ -29,6 +32,8 @@ struct DesktopView: View {
     @State private var path = NavigationPath()
     @State private var compose: ComposeRequest?
     @State private var showAbout = false
+    @State private var editing: Set<UUID> = []
+    @ObservedObject private var followUps = FollowUpStore.shared
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -61,6 +66,12 @@ struct DesktopView: View {
                     AccountEditView(existing: a)
                 case .settings:
                     SettingsView()
+                case .folderEdit(let a, let f, let parent):
+                    FolderEditView(account: a, folder: f, parent: parent)
+                case .followUps:
+                    FollowUpBoardView()
+                case .followUpMessage(let id):
+                    FollowUpMessageView(id: id)
                 }
             }
         }
@@ -106,6 +117,7 @@ struct DesktopView: View {
     private var mailboxes: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
+                followUpBar
                 ForEach(store.accounts) { a in
                     accountSection(a)
                 }
@@ -115,6 +127,45 @@ struct DesktopView: View {
             .padding(.bottom, 24)
         }
         .refreshable { await center.loadAll() }
+    }
+
+    /// 置顶的“跟进事项”按钮：旗标、提醒、截止日期和备注都集中在这里。
+    private var followUpBar: some View {
+        Button { path.append(Route.followUps) } label: {
+            HStack(spacing: 12) {
+                Image("fu-board")
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 38, height: 38)
+                    .shadow(color: .black.opacity(0.25), radius: 1, x: 0, y: 1)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(tr("跟进事项", "Follow-ups"))
+                        .font(RT.font(18, .bold))
+                    Text(followUps.summaryLine)
+                        .font(RT.font(12))
+                        .opacity(0.7)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                if followUps.overdueCount > 0 {
+                    Text("\(followUps.overdueCount)")
+                        .font(RT.font(14, .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(IOS3.red))
+                        .overlay(Capsule().stroke(Color.white, lineWidth: 1.5))
+                } else if followUps.openCount > 0 {
+                    CountPill(count: followUps.openCount)
+                }
+                Chevron()
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MailboxBarStyle())
     }
 
     private func accountSection(_ a: MailAccount) -> some View {
@@ -133,6 +184,15 @@ struct DesktopView: View {
                 Spacer(minLength: 0)
                 if center.loadingAccounts.contains(a.id) {
                     ProgressView().scaleEffect(0.7).tint(IOS3.groupHeader)
+                }
+                if center.folders[a.id] != nil {
+                    Button(editing.contains(a.id) ? tr("完成", "Done") : tr("编辑", "Edit")) {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            if editing.contains(a.id) { editing.remove(a.id) } else { editing.insert(a.id) }
+                        }
+                    }
+                    .buttonStyle(RetroButtonStyle(isDefault: editing.contains(a.id), compact: true))
+                    .shadow(radius: 0)
                 }
             }
             .foregroundColor(IOS3.groupHeader)
@@ -166,15 +226,40 @@ struct DesktopView: View {
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(IOS3.groupBorder, lineWidth: 1))
         } else if let folders = center.folders[a.id] {
             let shown = folders.filter(\.selectable)
+            let isEditing = editing.contains(a.id)
             ForEach(shown) { f in
                 Button {
-                    path.append(Route.folder(a, f))
+                    path.append(isEditing ? Route.folderEdit(a, f, parent: nil) : Route.folder(a, f))
                 } label: {
-                    MailboxBarLabel(folder: f, count: center.unread[center.unreadKey(a.id, f.path)] ?? 0,
-                                    showIcon: settings.mailboxIcons)
+                    MailboxBarLabel(folder: f, icon: f.icon(for: a.id),
+                                    count: center.unread[center.unreadKey(a.id, f.path)] ?? 0,
+                                    showIcon: settings.mailboxIcons, editing: isEditing)
                 }
                 .buttonStyle(MailboxBarStyle(nested: f.depth > 0))
                 .padding(.leading, CGFloat(min(f.depth, 3)) * 22)
+                .contextMenu {
+                    Button(tr("编辑邮箱…", "Edit Mailbox…")) { path.append(Route.folderEdit(a, f, parent: nil)) }
+                    Button(tr("新建子邮箱…", "New Mailbox Inside…")) { path.append(Route.folderEdit(a, nil, parent: f)) }
+                }
+            }
+            if isEditing {
+                Button { path.append(Route.folderEdit(a, nil, parent: nil)) } label: {
+                    HStack(spacing: 10) {
+                        Text("+").font(RT.font(24, .bold))
+                        Text(tr("新建邮箱", "New Mailbox")).font(RT.font(17, .bold))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .foregroundColor(IOS3.value)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(MailboxBarStyle(nested: true))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(IOS3.value.opacity(0.5), style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                        .padding(3)
+                        .allowsHitTesting(false)
+                )
             }
         } else {
             RetroBusy(text: tr("正在连接…", "Connecting…"))
@@ -282,28 +367,37 @@ private struct MailboxBarBody: View {
 
 struct MailboxBarLabel: View {
     let folder: MailFolder
+    var icon: String? = nil
     let count: Int
     var showIcon = true
+    var editing = false
+    var displayName: String? = nil
     @Environment(\.rowPressed) private var pressed
 
     var body: some View {
         let nested = folder.depth > 0
         HStack(spacing: 12) {
             if showIcon {
-                Image(folder.assetIcon)
+                Image(icon ?? folder.assetIcon)
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
                     .frame(width: nested ? 30 : 38, height: nested ? 30 : 38)
                     .shadow(color: .black.opacity(0.25), radius: 1, x: 0, y: 1)
             }
-            Text(folder.displayName)
+            Text(displayName ?? folder.displayName)
                 .font(RT.font(nested ? 16 : 18, .bold))
                 .shadow(color: pressed ? .black.opacity(0.3) : .white.opacity(0.6), radius: 0, x: 0, y: pressed ? -1 : 1)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 6)
-            if count > 0 { CountPill(count: count) }
+            if editing {
+                Text(tr("编辑", "Edit"))
+                    .font(RT.font(14, .bold))
+                    .foregroundColor(pressed ? .white : IOS3.dateBlue)
+            } else if count > 0 {
+                CountPill(count: count)
+            }
             Chevron()
         }
         .padding(.leading, showIcon ? 10 : 16)
@@ -417,7 +511,7 @@ struct AboutBox: View {
         RetroDialog {
             VStack(spacing: 10) {
                 Text("RetroMail").font(RT.font(18, .bold))
-                Text(tr("版本 3.3", "Version 3.3")).font(RT.font(14))
+                Text(tr("版本 3.4", "Version 3.4")).font(RT.font(14))
                 Text(tr("iPhone OS 3 风格的邮件客户端。\nIMAP · SMTP · 会话 · 富文本 · AI",
                         "A mail client in the style of iPhone OS 3.\nIMAP · SMTP · Threads · Rich text · AI"))
                     .font(RT.font(14))
