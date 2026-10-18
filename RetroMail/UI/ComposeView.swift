@@ -113,6 +113,7 @@ struct ComposeView: View {
         .background(IOS3.cell.ignoresSafeArea())
         .busyOverlay(busy != nil, busy ?? "")
         .retroAlert($error)
+        .sheetHost()
         .onChange(of: ed.focused) { f in
             if f { fieldsExpanded = false }
         }

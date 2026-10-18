@@ -436,8 +436,26 @@ struct ParsedMessage {
                 if type == "text/html" { htmls.append(p.text); return }
             }
             var name = p.filename ?? ""
+            let data = p.decodedData
+            if type == "message/rfc822" {
+                // 转发的邮件：用它自己的主题当文件名
+                let (h, _) = MIMEPart.splitHeaderBody(data)
+                let subj = HeaderCoding.decode(MIMEHeaders.parse(h)["Subject"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let generic = ["message.eml", "forwarded message.eml", "attached message.eml", "noname", "untitled.eml"]
+                if !subj.isEmpty && (name.isEmpty || generic.contains(name.lowercased()) || name.lowercased().hasPrefix("att0")) {
+                    name = String(subj.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-").prefix(80)) + ".eml"
+                }
+            }
             if name.isEmpty { name = defaultName(for: type) }
-            let att = MailAttachment(filename: name, mimeType: type, data: p.decodedData, contentId: p.contentId)
+            // Outlook 的 winmail.dat：解包出里面真正的附件
+            if TNEF.isTNEF(data, mimeType: type, filename: name) {
+                let inner = TNEF.extract(data)
+                if !inner.isEmpty {
+                    files.append(contentsOf: inner)
+                    return
+                }
+            }
+            let att = MailAttachment(filename: name, mimeType: type, data: data, contentId: p.contentId)
             if !isAttachment, p.contentId != nil, type.hasPrefix("image/") {
                 inline.append(att)
             } else {
@@ -489,9 +507,7 @@ struct ParsedMessage {
 
     /// 列表/折叠卡片里显示的摘要。
     var snippet: String {
-        let t = newText.isEmpty ? plainText : newText
-        let collapsed = t.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
-        return String(collapsed.prefix(160))
+        PreviewText.clean(plainText)
     }
 
     var hasRemoteContent: Bool {
@@ -553,7 +569,15 @@ struct ParsedMessage {
 /// 从正文开头的一小段数据里提取预览文字（数据可能被截断）。
 enum PreviewText {
     static func extract(_ data: Data, contentType: String?, transferEncoding: String?) -> String {
-        let ct = HeaderValue.parse(contentType)
+        var ct = HeaderValue.parse(contentType)
+        // 没有 Content-Type 信息时，从数据第一行猜出分隔符
+        if !ct.value.hasPrefix("multipart/") {
+            let head = String(decoding: data.prefix(300), as: UTF8.self)
+            if let first = head.split(whereSeparator: { $0.isNewline }).first,
+               first.hasPrefix("--"), first.count > 4, !first.contains(" ") {
+                ct = HeaderValue(value: "multipart/mixed", params: ["boundary": String(first.dropFirst(2))])
+            }
+        }
         var text = ""
         if ct.value.hasPrefix("multipart/"), let b = ct.params["boundary"], !b.isEmpty {
             text = firstText(in: MIMEPart.splitMultipart(data, boundary: b), depth: 0)
@@ -596,13 +620,18 @@ enum PreviewText {
         return p.contentType.value == "text/html" ? HTMLText.plain(s) : s
     }
 
+    private static let junk = try! NSRegularExpression(
+        pattern: "<(mailto:|https?://|tel:)[^>\\s]*>|\\[(cid|image|图片|cid:image)[^\\]]{0,200}\\]|[\\u200B-\\u200F\\u2028\\u2029\\uFEFF\\uFFFD\\u00AD]",
+        options: [.caseInsensitive])
+
     static func clean(_ s: String) -> String {
-        var t = s.replacingOccurrences(of: "\r\n", with: "\n")
+        var t = s.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\u{00A0}", with: " ")
         t = QuoteStripper.strip(t).text
         let lines = t.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix(">") }
-        let collapsed = lines.joined(separator: " ")
-            .replacingOccurrences(of: "\u{FFFD}", with: "")
-            .components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        var joined = lines.joined(separator: " ")
+        let ns = joined as NSString
+        joined = junk.stringByReplacingMatches(in: joined, range: NSRange(location: 0, length: ns.length), withTemplate: "")
+        let collapsed = joined.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
         return String(collapsed.prefix(200))
     }
 }

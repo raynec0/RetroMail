@@ -210,9 +210,11 @@ private struct BarButtonBody: View {
             .lineLimit(1)
             .foregroundColor(.white)
             .shadow(color: .black.opacity(0.45), radius: 0, x: 0, y: -1)
+            .truncationMode(.tail)
             .padding(.leading, kind == .back ? 15 : 9)
             .padding(.trailing, 9)
-            .frame(minWidth: kind == .back ? 50 : 34, minHeight: 30)
+            .frame(minWidth: kind == .back ? 50 : 34, maxWidth: kind == .back ? 118 : 150, minHeight: 30)
+            .fixedSize(horizontal: false, vertical: true)
             .background {
                 if kind == .back {
                     ZStack {
@@ -235,10 +237,22 @@ private struct BarButtonBody: View {
     }
 }
 
+private struct LeadingWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+private struct TrailingWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 struct IOS3NavBar<Leading: View, Trailing: View>: View {
     let title: String
     let leading: Leading
     let trailing: Trailing
+    @State private var leadingWidth: CGFloat = 0
+    @State private var trailingWidth: CGFloat = 0
 
     init(title: String, @ViewBuilder leading: () -> Leading, @ViewBuilder trailing: () -> Trailing) {
         self.title = title
@@ -250,19 +264,25 @@ struct IOS3NavBar<Leading: View, Trailing: View>: View {
         ZStack {
             HStack(spacing: 6) {
                 leading
+                    .background(GeometryReader { g in Color.clear.preference(key: LeadingWidthKey.self, value: g.size.width) })
                 Spacer(minLength: 0)
                 trailing
+                    .background(GeometryReader { g in Color.clear.preference(key: TrailingWidthKey.self, value: g.size.width) })
             }
             .padding(.horizontal, 6)
+            // 标题居中，并且两侧留出按钮的宽度，不会被按钮盖住
             Text(title)
                 .font(RT.font(19, .bold))
                 .foregroundColor(IOS3.barText)
                 .shadow(color: IOS3.barTextShadow, radius: 0, x: 0, y: -1)
                 .lineLimit(1)
-                .minimumScaleFactor(0.7)
-                .padding(.horizontal, 84)
+                .minimumScaleFactor(0.6)
+                .truncationMode(.tail)
+                .padding(.horizontal, max(leadingWidth, trailingWidth) + 12)
                 .allowsHitTesting(false)
         }
+        .onPreferenceChange(LeadingWidthKey.self) { leadingWidth = $0 }
+        .onPreferenceChange(TrailingWidthKey.self) { trailingWidth = $0 }
         .frame(height: 44)
         .frame(maxWidth: .infinity)
         .background(IOS3.bar.ignoresSafeArea(edges: .top))
@@ -1209,7 +1229,52 @@ private struct ActionSheetModifier: ViewModifier {
     }
 }
 
+/// 全局动作表：嵌在小区域里的组件（附件、邀请）也能弹出全屏的动作表。
+/// 每个全屏容器（首页、写信页、弹出面板）放一个 host，只有最上层的 host 显示。
+@MainActor
+final class SheetCenter: ObservableObject {
+    static let shared = SheetCenter()
+
+    @Published var title: String?
+    @Published var actions: [SheetAction] = []
+    @Published var presented = false
+    @Published private(set) var hosts: [UUID] = []
+
+    func present(_ title: String?, _ actions: [SheetAction]) {
+        self.title = title
+        self.actions = actions
+        presented = true
+    }
+
+    func register(_ id: UUID) {
+        hosts.removeAll { $0 == id }
+        hosts.append(id)
+    }
+
+    func unregister(_ id: UUID) {
+        hosts.removeAll { $0 == id }
+    }
+}
+
+private struct SheetHostModifier: ViewModifier {
+    @ObservedObject private var center = SheetCenter.shared
+    @State private var id = UUID()
+
+    func body(content: Content) -> some View {
+        content
+            .ios3ActionSheet(isPresented: Binding(get: { center.presented && center.hosts.last == id },
+                                                  set: { if !$0 { center.presented = false } }),
+                             title: center.title, actions: center.actions)
+            .onAppear { center.register(id) }
+            .onDisappear { center.unregister(id) }
+    }
+}
+
 extension View {
+    func sheetHost() -> some View {
+        modifier(SheetHostModifier())
+    }
+
     func retroAlert(_ message: Binding<String?>) -> some View {
         modifier(RetroAlertModifier(message: message))
     }
@@ -1250,6 +1315,7 @@ struct RetroPanel<Content: View>: View {
         }
         .foregroundColor(.ink)
         .background(PinstripeBackground())
+        .sheetHost()
     }
 }
 

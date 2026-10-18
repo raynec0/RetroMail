@@ -74,6 +74,7 @@ struct DesktopView: View {
         .overlay {
             if showAbout { AboutBox { showAbout = false } }
         }
+        .sheetHost()
         .task {
             await center.loadAll()
         }
@@ -225,7 +226,7 @@ struct AboutBox: View {
         RetroDialog {
             VStack(spacing: 10) {
                 Text("RetroMail").font(RT.font(18, .bold))
-                Text(tr("版本 3.0", "Version 3.0")).font(RT.font(14))
+                Text(tr("版本 3.1", "Version 3.1")).font(RT.font(14))
                 Text(tr("iPhone OS 3 风格的邮件客户端。\nIMAP · SMTP · 会话 · 富文本 · AI",
                         "A mail client in the style of iPhone OS 3.\nIMAP · SMTP · Threads · Rich text · AI"))
                     .font(RT.font(14))

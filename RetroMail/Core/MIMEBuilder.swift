@@ -41,6 +41,9 @@ struct OutgoingMail {
     var references: String?
     var priority: MailPriority = .normal
     var readReceipt = false
+    /// 会议回复：作为 multipart/alternative 的 text/calendar 部分发送（Outlook 的做法）
+    var calendarMethod: String?
+    var calendarICS: String?
 
     var allRecipients: [String] {
         var seen = Set<String>()
@@ -108,7 +111,10 @@ enum MIMEBuilder {
         let textNode = Node.leaf(headers: [("Content-Type", "text/plain; charset=UTF-8")], data: Data(text.utf8))
 
         var bodyNode = textNode
-        if let html = mail.html {
+        if let method = mail.calendarMethod, let ics = mail.calendarICS {
+            let cal = Node.leaf(headers: [("Content-Type", "text/calendar; method=\(method); charset=UTF-8")], data: Data(ics.utf8))
+            bodyNode = .multi(subtype: "alternative", parts: [textNode, cal])
+        } else if let html = mail.html {
             let (rewritten, images) = extractInlineImages(html, domain: domain)
             let full = wrapHTML(rewritten)
             let htmlNode = Node.leaf(headers: [("Content-Type", "text/html; charset=UTF-8")], data: Data(full.utf8))

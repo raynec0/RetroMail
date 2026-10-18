@@ -4,9 +4,11 @@ import UIKit
 struct ThreadItem: Identifiable {
     let folder: String
     var summary: MessageSummary
-    var parsed: ParsedMessage?
+    /// 后台算好的显示数据（解析结果、摘要、HTML 页面等）
+    var display: MessageDisplay?
     var failed = false
 
+    var parsed: ParsedMessage? { display?.parsed }
     var id: String { folder + "#" + String(summary.uid) }
 }
 
@@ -17,6 +19,14 @@ final class ConversationModel: ObservableObject {
     @Published var expanded: Set<String> = []
     @Published var error: String?
     @Published var loadingRelated = false
+    /// 超过 4 封时，中间的旧邮件先折叠成一行
+    @Published var showAll = false
+    /// 正在下载正文的邮件
+    @Published private(set) var inFlight: Set<String> = []
+    private var backgroundWork: Task<Void, Never>?
+
+    /// 后台预取正文的大小上限；更大的邮件（通常带大附件）等用户点开再下载。
+    private static let prefetchLimit = 600_000
 
     var account: MailAccount { list.account }
     var currentFolder: String { list.folder.path }
@@ -37,15 +47,14 @@ final class ConversationModel: ObservableObject {
     }
 
     var latestParsed: ThreadItem? {
-        items.last { $0.parsed != nil }
+        items.last { $0.display != nil }
     }
 
-    /// 正在下载正文的邮件
-    @Published private(set) var inFlight: Set<String> = []
-    private var backgroundWork: Task<Void, Never>?
-
-    /// 后台预取正文的大小上限；更大的邮件（通常带大附件）等用户点开再下载。
-    private static let prefetchLimit = 400_000
+    /// 自己的地址显示为“我”。
+    func name(_ a: MailAddress?) -> String {
+        guard let a = a else { return tr("（未知发件人）", "(Unknown Sender)") }
+        return account.isMine(a.email) ? tr("我", "Me") : a.display
+    }
 
     /// 先只下载并显示最新一封，其余工作（标记已读、查找关联邮件、预取旧邮件）都放到后台，不阻塞界面。
     func load() async {
@@ -53,9 +62,11 @@ final class ConversationModel: ObservableObject {
 
         let unseen = items.filter { $0.folder == currentFolder && !$0.summary.seen }.map(\.summary.uid)
         if !unseen.isEmpty {
-            for i in items.indices where unseen.contains(items[i].summary.uid) && items[i].folder == currentFolder {
-                items[i].summary.set("\\Seen", true)
+            var updated = items
+            for i in updated.indices where unseen.contains(updated[i].summary.uid) && updated[i].folder == currentFolder {
+                updated[i].summary.set("\\Seen", true)
             }
+            items = updated
             let list = self.list
             Task { await list.setSeen(unseen, true) }
         }
@@ -98,11 +109,15 @@ final class ConversationModel: ObservableObject {
         }
         merged.sort { $0.summary.received < $1.summary.received }
         if merged.count > 40 { merged = Array(merged.suffix(40)) }
+        // 最新一封保持展开
+        if let last = merged.last, !expanded.contains(last.id), merged.last?.id != items.last?.id {
+            expanded.insert(last.id)
+        }
         items = merged
     }
 
     func fetch(_ id: String, lane: MailCenter.Lane = .interactive, prefetch: Bool = false) async {
-        guard let idx = items.firstIndex(where: { $0.id == id }), items[idx].parsed == nil,
+        guard let idx = items.firstIndex(where: { $0.id == id }), items[idx].display == nil,
               !inFlight.contains(id) else { return }
         let item = items[idx]
         let path = item.folder
@@ -121,9 +136,10 @@ final class ConversationModel: ObservableObject {
                 raw = try await client.perform { try await $0.fetchRaw(path, uid: uid) }
                 Task.detached { DiskCache.saveRaw(raw, account: accountId, folder: path, uid: uid) }
             }
-            let parsed = await Task.detached { ParsedMessage.parse(raw) }.value
+            // 解析和所有显示计算都在后台完成，主线程只接收结果
+            let display = await MessageDisplay.make(raw)
             if let i = items.firstIndex(where: { $0.id == id }) {
-                items[i].parsed = parsed
+                items[i].display = display
                 items[i].failed = false
             }
         } catch {
@@ -158,22 +174,31 @@ final class ConversationModel: ObservableObject {
         items.filter { $0.folder == currentFolder }.map(\.summary.uid)
     }
 
-    func markLatestUnread() async {
-        guard let last = items.last(where: { $0.folder == currentFolder }) else { return }
-        await list.setSeen([last.summary.uid], false)
-    }
-
     /// 给 AI 总结用的会话文本（每封只取新内容）。
     var threadText: String {
         var parts: [String] = []
         for it in items {
-            guard let p = it.parsed else { continue }
+            guard let d = it.display else { continue }
+            let p = d.parsed
             let from = p.from.first?.full ?? it.summary.from?.full ?? ""
             let date = Fmt.long(p.date ?? it.summary.received)
-            let body = p.newText.isEmpty ? p.plainText : p.newText
+            let body = d.newText.isEmpty ? p.plainText : d.newText
             parts.append("From: \(from)\nDate: \(date)\nSubject: \(p.subject)\n\n\(body.prefix(4000))")
         }
         return String(parts.joined(separator: "\n\n-----\n\n").suffix(16000))
+    }
+}
+
+/// 会话页中显示的一行：一封邮件，或“另外 N 封邮件”折叠行。
+private enum ThreadRow: Identifiable {
+    case item(ThreadItem)
+    case more(Int)
+
+    var id: String {
+        switch self {
+        case .item(let i): return i.id
+        case .more: return "more"
+        }
     }
 }
 
@@ -183,13 +208,13 @@ struct ConversationView: View {
     let position: (index: Int, count: Int)
     let onStep: (Int) -> Void
     @State private var compose: ComposeRequest?
-    @State private var preview: PreviewItem?
     @State private var fullscreen: ThreadItem?
     @State private var showMove = false
     @State private var showSummary = false
     @State private var showReply = false
     @State private var showDelete = false
     @State private var cardActionsFor: ThreadItem?
+    @State private var invite: MailAttachment?
     @Environment(\.dismiss) private var dismiss
 
     init(list: MessageListModel, conversation: Conversation,
@@ -200,6 +225,12 @@ struct ConversationView: View {
     }
 
     private var isDraft: Bool { model.list.folder.role == .drafts }
+
+    private var rows: [ThreadRow] {
+        let items = model.items
+        guard items.count > 4, !model.showAll else { return items.map { .item($0) } }
+        return [.item(items[0]), .more(items.count - 4)] + items.suffix(3).map { .item($0) }
+    }
 
     var body: some View {
         RetroScreen(title: tr("第 \(position.index + 1) 封，共 \(position.count) 封", "\(position.index + 1) of \(position.count)"),
@@ -222,17 +253,22 @@ struct ConversationView: View {
                     ScrollView {
                         VStack(spacing: 0) {
                             threadHeader
-                            ForEach(model.items) { item in
-                                card(item).id(item.id)
+                            ForEach(rows) { row in
+                                switch row {
+                                case .item(let item):
+                                    card(item).id(item.id)
+                                case .more(let n):
+                                    moreRow(n)
+                                }
                             }
                         }
-                        .padding(.bottom, 20)
+                        .padding(.bottom, 24)
                     }
                     .background(IOS3.cell)
                     .onAppear {
                         if model.items.count > 1, let last = model.items.last?.id {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                                withAnimation { proxy.scrollTo(last, anchor: .top) }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                                proxy.scrollTo(last, anchor: .top)
                             }
                         }
                     }
@@ -260,13 +296,10 @@ struct ConversationView: View {
                 .environmentObject(settings)
                 .preferredColorScheme(settings.colorScheme)
         }
-        .sheet(item: $preview) { item in
-            QuickLookView(url: item.url).ignoresSafeArea()
-        }
         .sheet(item: $fullscreen) { item in
             RetroPanel(item.parsed?.subject ?? "") {
-                if let p = item.parsed {
-                    HTMLView(html: p.renderHTML(allowRemote: true)) { addr in
+                if let d = item.display {
+                    HTMLView(html: d.page(remote: true, hideQuotes: false)) { addr in
                         fullscreen = nil
                         compose = ComposeRequest(account: model.account, to: addr)
                     }
@@ -274,6 +307,11 @@ struct ConversationView: View {
                 }
             }
             .preferredColorScheme(settings.colorScheme)
+        }
+        .sheet(item: $invite) { att in
+            CalendarInviteView(data: att.data, account: model.account)
+                .environmentObject(settings)
+                .preferredColorScheme(settings.colorScheme)
         }
         .sheet(isPresented: $showMove) {
             FolderPickerView(account: model.account, excluding: model.currentFolder) { dest in
@@ -298,9 +336,10 @@ struct ConversationView: View {
     @ViewBuilder
     private var threadHeader: some View {
         if model.items.count > 1 {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(model.subject)
-                    .font(RT.font(18, .bold))
+                    .font(RT.font(17, .bold))
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                 HStack(spacing: 6) {
@@ -310,11 +349,11 @@ struct ConversationView: View {
                         ProgressView().scaleEffect(0.6)
                     }
                 }
-                .font(RT.font(13))
+                .font(RT.font(12))
                 .foregroundColor(IOS3.secondary)
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(alignment: .bottom) { RetroDivider() }
         }
@@ -322,13 +361,42 @@ struct ConversationView: View {
 
     private var participants: String {
         var seen = Set<String>()
-        let names = model.items.compactMap { $0.summary.from?.display }.filter { seen.insert($0).inserted }
+        let names = model.items.map { model.name($0.summary.from) }.filter { seen.insert($0).inserted }
         return names.isEmpty ? "" : " · " + names.prefix(4).joined(separator: ", ")
+    }
+
+    private func moreRow(_ n: Int) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.15)) { model.showAll = true }
+        } label: {
+            HStack {
+                Spacer()
+                Text(tr("另外 \(n) 封邮件", "\(n) more messages"))
+                    .font(RT.font(14, .bold))
+                    .foregroundColor(IOS3.dateBlue)
+                Spacer()
+            }
+            .frame(minHeight: 34)
+            .background(
+                ZStack {
+                    VStack(spacing: 3) {
+                        RetroDivider()
+                        RetroDivider()
+                    }
+                    .padding(.horizontal, 30)
+                }
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(InvertOnPressStyle())
+        .overlay(alignment: .bottom) { RetroDivider() }
     }
 
     private func card(_ item: ThreadItem) -> some View {
         MessageCard(
             item: item,
+            senderName: model.name(item.parsed?.from.first ?? item.summary.from),
+            account: model.account,
             isLatest: item.id == model.items.last?.id,
             single: model.items.count == 1,
             loading: model.inFlight.contains(item.id),
@@ -346,13 +414,7 @@ struct ConversationView: View {
                     dismiss()
                 }
             },
-            onOpen: { att in
-                do {
-                    preview = PreviewItem(url: try AttachmentFiles.write(att))
-                } catch {
-                    model.error = error.localizedDescription
-                }
-            },
+            onInvite: { invite = $0 },
             onMailto: { addr in compose = ComposeRequest(account: model.account, to: addr) }
         )
     }
@@ -406,9 +468,10 @@ struct ConversationView: View {
 struct AddressBubble: View {
     let address: MailAddress
     var full = false
+    var label: String?
 
     var body: some View {
-        Text(full ? address.full : address.display)
+        Text(label ?? (full ? address.full : address.display))
             .font(RT.font(13, .bold))
             .foregroundColor(.black)
             .lineLimit(1)
@@ -424,6 +487,8 @@ struct AddressBubble: View {
 
 struct MessageCard: View {
     let item: ThreadItem
+    let senderName: String
+    let account: MailAccount
     let isLatest: Bool
     let single: Bool
     let loading: Bool
@@ -431,7 +496,7 @@ struct MessageCard: View {
     let folderBadge: String?
     let onActions: () -> Void
     let onMarkUnread: () -> Void
-    let onOpen: (MailAttachment) -> Void
+    let onInvite: (MailAttachment) -> Void
     let onMailto: (String) -> Void
 
     @EnvironmentObject private var settings: AppSettings
@@ -448,21 +513,21 @@ struct MessageCard: View {
         VStack(alignment: .leading, spacing: 0) {
             if expanded || single {
                 expandedView
+                if !single {
+                    Rectangle().fill(IOS3.separator).frame(height: 6)
+                }
             } else {
                 collapsedRow
             }
-            Rectangle().fill(IOS3.separator).frame(height: single ? 0 : 8)
-                .overlay(alignment: .top) { RetroDivider() }
         }
         .foregroundColor(.ink)
     }
 
-    // 折叠：和列表行一样
     private var collapsedRow: some View {
         Button {
             withAnimation(.easeOut(duration: 0.15)) { expanded = true }
         } label: {
-            CollapsedMessageLabel(item: item, loading: loading, folderBadge: folderBadge)
+            CollapsedMessageLabel(item: item, sender: senderName, loading: loading, folderBadge: folderBadge)
         }
         .buttonStyle(InvertOnPressStyle())
     }
@@ -472,23 +537,28 @@ struct MessageCard: View {
         VStack(alignment: .leading, spacing: 0) {
             headerBlock
             RetroDivider()
-            if let p = item.parsed {
-                if p.hasRemoteContent && !allowRemote {
+            if let d = item.display {
+                ForEach(d.invites.indices, id: \.self) { i in
+                    InviteBanner(event: d.invites[i].event) { onInvite(d.invites[i].attachment) }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 10)
+                }
+                if d.hasRemote && !allowRemote {
                     Button(tr("载入全部图片", "Load All Images")) { allowRemote = true }
                         .font(RT.font(14, .bold))
                         .foregroundColor(IOS3.dateBlue)
                         .buttonStyle(.plain)
                         .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
+                        .padding(.top, 8)
                 }
-                AutoHeightHTMLView(html: p.renderHTML(allowRemote: allowRemote, hideQuotes: hide),
+                AutoHeightHTMLView(html: d.page(remote: allowRemote, hideQuotes: hide),
                                    hideQuotes: hide,
                                    height: $height,
-                                   onQuoteDetected: { found in if found { quoteFound = true } },
+                                   onQuoteDetected: { found in if found && !quoteFound { quoteFound = true } },
                                    onMailto: onMailto)
                     .frame(height: max(height, 44))
                     .id((hide ? "h" : "s") + (allowRemote ? "r" : ""))
-                if quoteFound || p.plainHasQuote {
+                if quoteFound || d.plainHasQuote {
                     Button(showQuotes ? tr("隐藏引用的文字", "Hide Quoted Text") : tr("显示引用的文字", "Show Quoted Text")) {
                         showQuotes.toggle()
                         height = 1
@@ -499,29 +569,46 @@ struct MessageCard: View {
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)
                 }
-                if !p.attachments.isEmpty { attachments(p.attachments) }
+                if !d.parsed.attachments.isEmpty {
+                    AttachmentList(attachments: d.parsed.attachments, account: account)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 12)
+                }
             } else if item.failed && !loading {
-                Text(tr("无法载入这封邮件。", "This message couldn't be loaded."))
-                    .font(RT.font(15))
-                    .foregroundColor(IOS3.secondary)
-                    .padding(14)
+                Button(tr("无法载入这封邮件，点按重试", "Couldn't load this message. Tap to retry.")) {
+                    expanded = false
+                    expanded = true
+                }
+                .font(RT.font(15))
+                .foregroundColor(IOS3.secondary)
+                .buttonStyle(.plain)
+                .padding(14)
             } else {
-                RetroBusy(text: tr("正在下载…", "Downloading…"))
-                    .padding(14)
+                HStack {
+                    RetroBusy(text: tr("正在下载…", "Downloading…"))
+                    Spacer()
+                    if item.summary.size > 0 {
+                        Text(Fmt.size(item.summary.size)).font(RT.font(12)).foregroundColor(IOS3.secondary)
+                    }
+                }
+                .padding(14)
             }
         }
     }
 
-    /// iPhone OS 3 邮件头：发件人/收件人气泡、主题、日期、“标为未读”。
+    /// 紧凑的 iPhone OS 3 邮件头。
     private var headerBlock: some View {
         let to = item.parsed?.to ?? item.summary.to
         let cc = item.parsed?.cc ?? item.summary.cc
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
+        let subject = item.parsed?.subject ?? item.summary.subject
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .center, spacing: 6) {
                 Text(tr("发件人：", "From:")).font(RT.font(14)).foregroundColor(IOS3.secondary)
-                if let s = sender { AddressBubble(address: s, full: details) }
+                if let s = sender {
+                    AddressBubble(address: s, full: details, label: details ? nil : senderName)
+                }
                 if let badge = folderBadge {
-                    Text(badge).font(RT.font(11, .bold)).foregroundColor(IOS3.secondary)
+                    Text(badge).font(RT.font(11, .bold)).foregroundColor(IOS3.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 4)
                 Button(details ? tr("隐藏", "Hide") : tr("详细信息", "Details")) { details.toggle() }
@@ -529,33 +616,41 @@ struct MessageCard: View {
                     .foregroundColor(IOS3.dateBlue)
                     .buttonStyle(.plain)
             }
-            if details || to.count <= 2 {
+            if details {
                 addressLine(tr("收件人：", "To:"), to)
                 if !cc.isEmpty { addressLine(tr("抄送：", "Cc:"), cc) }
             } else {
                 HStack(spacing: 6) {
                     Text(tr("收件人：", "To:")).font(RT.font(14)).foregroundColor(IOS3.secondary)
-                    AddressBubble(address: to[0])
-                    Text(tr("等 \(to.count + cc.count) 人", "and \(to.count + cc.count - 1) more"))
-                        .font(RT.font(13)).foregroundColor(IOS3.secondary)
+                    if let first = to.first {
+                        AddressBubble(address: first, label: account.isMine(first.email) ? tr("我", "Me") : nil)
+                    }
+                    if to.count + cc.count > 1 {
+                        Text(tr("等 \(to.count + cc.count) 人", "and \(to.count + cc.count - 1) more"))
+                            .font(RT.font(13)).foregroundColor(IOS3.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
                 }
             }
-            RetroDivider().padding(.vertical, 2)
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text((item.parsed?.subject ?? item.summary.subject).isEmpty ? tr("（无主题）", "(No Subject)") : (item.parsed?.subject ?? item.summary.subject))
-                        .font(RT.font(17, .bold))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                    Text(Fmt.long(item.parsed?.date ?? item.summary.received))
-                        .font(RT.font(13))
-                        .foregroundColor(IOS3.secondary)
-                    if isLatest {
-                        Button(tr("标为未读", "Mark as Unread"), action: onMarkUnread)
-                            .font(RT.font(13, .bold))
-                            .foregroundColor(IOS3.dateBlue)
-                            .buttonStyle(.plain)
-                            .padding(.top, 2)
+            RetroDivider().padding(.vertical, 1)
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    if single {
+                        Text(subject.isEmpty ? tr("（无主题）", "(No Subject)") : subject)
+                            .font(RT.font(17, .bold))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                    HStack(spacing: 10) {
+                        Text(Fmt.long(item.parsed?.date ?? item.summary.received))
+                            .font(RT.font(13))
+                            .foregroundColor(IOS3.secondary)
+                        if isLatest {
+                            Button(tr("标为未读", "Mark as Unread"), action: onMarkUnread)
+                                .font(RT.font(13, .bold))
+                                .foregroundColor(IOS3.dateBlue)
+                                .buttonStyle(.plain)
+                        }
                     }
                 }
                 Spacer(minLength: 6)
@@ -563,21 +658,21 @@ struct MessageCard: View {
                     Button {
                         withAnimation(.easeOut(duration: 0.15)) { expanded = false }
                     } label: {
-                        Image(systemName: "chevron.up.circle").font(.system(size: 20))
+                        Image(systemName: "chevron.up.circle").font(.system(size: 22))
                     }
                     .buttonStyle(.plain)
                     .foregroundColor(IOS3.chevron)
                 }
                 Button(action: onActions) {
-                    Image(systemName: "arrowshape.turn.up.left.circle").font(.system(size: 22))
+                    Image(systemName: "arrowshape.turn.up.left.circle").font(.system(size: 24))
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(IOS3.value)
-                .disabled(item.parsed == nil)
+                .disabled(item.display == nil)
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.vertical, 9)
     }
 
     private func addressLine(_ label: String, _ list: [MailAddress]) -> some View {
@@ -588,88 +683,65 @@ struct MessageCard: View {
             } else {
                 FlowRow(spacing: 5) {
                     ForEach(list.indices, id: \.self) { i in
-                        AddressBubble(address: list[i], full: details)
+                        AddressBubble(address: list[i], full: true)
                     }
                 }
             }
         }
-    }
-
-    private func attachments(_ items: [MailAttachment]) -> some View {
-        VStack(spacing: 8) {
-            ForEach(items) { att in
-                Button {
-                    onOpen(att)
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: AttachmentFiles.icon(for: att.mimeType))
-                            .font(.system(size: 22))
-                            .foregroundColor(IOS3.value)
-                            .frame(width: 30)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(att.filename).font(RT.font(14, .bold)).lineLimit(1)
-                            Text(Fmt.size(att.data.count)).font(RT.font(12)).foregroundColor(IOS3.secondary)
-                        }
-                        Spacer()
-                        Chevron()
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(minHeight: 48)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(IOS3.groupBorder, lineWidth: 1))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(InvertOnPressStyle())
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 12)
     }
 }
 
 struct CollapsedMessageLabel: View {
     let item: ThreadItem
+    let sender: String
     let loading: Bool
     let folderBadge: String?
     @Environment(\.rowPressed) private var pressed
 
+    private var snippet: String {
+        if let s = item.display?.snippet, !s.isEmpty { return s }
+        if let p = item.summary.preview, !p.isEmpty { return p }
+        if item.failed { return tr("无法载入，点按重试", "Couldn't load — tap to retry") }
+        if loading { return tr("正在下载…", "Downloading…") }
+        return item.summary.subject
+    }
+
     var body: some View {
         let gray = pressed ? Color.white : IOS3.secondary
-        HStack(alignment: .top, spacing: 0) {
+        HStack(alignment: .center, spacing: 0) {
             Group {
                 if !item.summary.seen { UnreadDot() } else { Color.clear.frame(width: 12, height: 12) }
             }
-            .frame(width: 28)
-            .padding(.top, 4)
-            VStack(alignment: .leading, spacing: 2) {
+            .frame(width: 26)
+            VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
-                    Text(item.parsed?.from.first?.display ?? item.summary.from?.display ?? tr("（未知发件人）", "(Unknown Sender)"))
-                        .font(RT.font(16, .bold))
+                    Text(sender)
+                        .font(RT.font(15, .bold))
                         .lineLimit(1)
                     if let b = folderBadge {
-                        Text(b).font(RT.font(11, .bold)).foregroundColor(gray)
+                        Text(b).font(RT.font(11, .bold)).foregroundColor(gray).lineLimit(1)
                     }
                     Spacer(minLength: 4)
                     if item.summary.hasAttachment {
-                        Image(systemName: "paperclip").font(.system(size: 12)).foregroundColor(gray)
+                        Image(systemName: "paperclip").font(.system(size: 11)).foregroundColor(gray)
                     }
                     Text(Fmt.short(item.summary.received))
-                        .font(RT.font(14))
+                        .font(RT.font(13))
                         .foregroundColor(pressed ? .white : IOS3.dateBlue)
-                    Chevron()
                 }
-                Text(item.parsed?.snippet ?? item.summary.preview
-                     ?? (item.failed ? tr("无法载入，点按重试", "Couldn't load — tap to retry")
-                         : loading ? tr("正在下载…", "Downloading…") : tr("点按查看", "Tap to view")))
-                    .font(RT.font(14))
+                Text(snippet)
+                    .font(RT.font(13))
                     .foregroundColor(gray)
-                    .lineLimit(2)
+                    .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.trailing, 8)
+            .padding(.trailing, 10)
         }
-        .padding(.vertical, 9)
+        .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(pressed ? Color.clear : IOS3.separator).frame(height: 1)
+        }
     }
 }

@@ -104,19 +104,21 @@ final class MessageListModel: ObservableObject {
         }
     }
 
-    /// 在后台连接上补取正文预览（每封只取前 1.5 KB），分批更新列表。
+    /// 在“列表”连接上补取正文预览（每封只取前 1.5 KB），分批更新列表。
+    /// 这条连接在列表刷新后是空闲的，不会排在未读数查询后面。
     func loadPreviews() {
+        guard messages.contains(where: { $0.preview == nil }) else { return }
         previewTask?.cancel()
         let path = folder.path
         let acc = account
         previewTask = Task { [weak self] in
             guard let self = self else { return }
             let missing = self.messages.filter { $0.preview == nil }
-            let bg = MailCenter.shared.client(for: acc, .background)
+            let bg = MailCenter.shared.client(for: acc, .sync)
             for start in stride(from: 0, to: missing.count, by: 20) {
                 if Task.isCancelled { return }
                 let batch = Array(missing[start..<min(start + 20, missing.count)])
-                guard let raw = try? await bg.perform({ try await $0.fetchPreviews(path, uids: batch.map(\.uid)) }) else { return }
+                guard let raw = try? await bg.perform({ try await $0.fetchPreviews(path, uids: batch.map(\.uid)) }) else { continue }
                 let info = Dictionary(uniqueKeysWithValues: batch.map { ($0.uid, ($0.contentType, $0.transferEncoding)) })
                 let texts = await Task.detached { () -> [Int: String] in
                     var out: [Int: String] = [:]
@@ -128,8 +130,12 @@ final class MessageListModel: ObservableObject {
                 }.value
                 if Task.isCancelled { return }
                 var updated = self.messages
-                for i in updated.indices {
-                    if let t = texts[updated[i].uid] { updated[i].preview = t }
+                for i in updated.indices where updated[i].preview == nil {
+                    if let t = texts[updated[i].uid] {
+                        updated[i].preview = t
+                    } else if batch.contains(where: { $0.uid == updated[i].uid }) {
+                        updated[i].preview = ""
+                    }
                 }
                 self.messages = updated
             }
@@ -286,7 +292,7 @@ struct MessageListView: View {
             await model.initialLoad()
             updatedAt = Date()
         }
-        .onDisappear { model.stopPreviews() }
+        .onAppear { model.loadPreviews() }
         .onChange(of: settings.threaded) { _ in model.regroup() }
         .navigationDestination(isPresented: Binding(get: { openConversation != nil },
                                                     set: { if !$0 { openConversation = nil } })) {
@@ -381,7 +387,7 @@ struct MessageListView: View {
             }
         } label: {
             ConversationRow(conversation: c, selecting: selecting, selected: isSelected,
-                            showRecipients: showRecipients, threaded: settings.threaded)
+                            showRecipients: showRecipients, threaded: settings.threaded, myEmail: account.email)
         }
         .buttonStyle(InvertOnPressStyle())
         .listRowInsets(EdgeInsets())
@@ -499,20 +505,32 @@ struct ConversationRow: View {
     var selected: Bool
     var showRecipients: Bool
     var threaded: Bool
+    var myEmail: String = ""
     @Environment(\.rowPressed) private var pressed
+
+    private func name(_ a: MailAddress) -> String {
+        a.email.caseInsensitiveCompare(myEmail) == .orderedSame ? tr("我", "Me") : a.display
+    }
 
     private var people: String {
         let m = conversation.latest
         if showRecipients {
-            let names = m.to.map(\.display).joined(separator: ", ")
+            let names = m.to.map(name).joined(separator: ", ")
             return names.isEmpty ? tr("（无收件人）", "(No Recipients)") : names
         }
         if threaded && conversation.count > 1 {
             var seen = Set<String>()
-            let names = conversation.messages.compactMap { $0.from?.display }.filter { seen.insert($0).inserted }
+            // 最近的发件人在前
+            let names = conversation.messages.compactMap { $0.from.map(name) }.filter { seen.insert($0).inserted }
             return names.prefix(3).joined(separator: ", ")
         }
-        return m.from?.display ?? tr("（未知发件人）", "(Unknown Sender)")
+        return m.from.map(name) ?? tr("（未知发件人）", "(Unknown Sender)")
+    }
+
+    /// 预览：优先最新一封，没有时用会话里其他有预览的邮件
+    private var previewText: String {
+        if let p = conversation.latest.preview, !p.isEmpty { return p }
+        return conversation.messages.compactMap { $0.preview }.first { !$0.isEmpty } ?? ""
     }
 
     var body: some View {
@@ -575,11 +593,21 @@ struct ConversationRow: View {
                             .background(Capsule().fill(pressed ? Color.white : IOS3.pill))
                     }
                 }
-                Text(m.preview ?? " ")
-                    .font(RT.font(14))
-                    .foregroundColor(gray)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
+                if !previewText.isEmpty {
+                    Text(previewText)
+                        .font(RT.font(14))
+                        .foregroundColor(gray)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                } else if conversation.latest.preview == nil {
+                    // 预览还在加载：占两行灰色细条，避免行高跳动
+                    VStack(alignment: .leading, spacing: 6) {
+                        Capsule().fill(IOS3.separator).frame(height: 8)
+                        Capsule().fill(IOS3.separator).frame(width: 140, height: 8)
+                    }
+                    .padding(.vertical, 5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .padding(.trailing, 8)
             .padding(.vertical, 6)
