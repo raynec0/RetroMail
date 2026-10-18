@@ -523,7 +523,7 @@ struct ParsedMessage {
             : "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:;"
         let head = """
         <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="viewport" content="\(Self.cardViewport)">
         <meta name="color-scheme" content="light dark">
         <meta http-equiv="Content-Security-Policy" content="\(csp)">
         <style>\(Self.css)</style>
@@ -549,6 +549,9 @@ struct ParsedMessage {
         return HTMLText.escape(plainText).replacingOccurrences(of: "\n", with: "<br>")
     }
 
+    /// 卡片里的页面：不允许缩放（全屏查看时会被替换成可缩放）
+    static let cardViewport = "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+
     private static let css = """
     html { -webkit-text-size-adjust: 100%; }
     html, body { height: auto !important; min-height: 0 !important; }
@@ -558,9 +561,10 @@ struct ParsedMessage {
     img { max-width: 100% !important; height: auto !important; }
     blockquote { margin: 0 0 0 4px; padding-left: 8px; border-left: 2px solid #888; }
     @media (prefers-color-scheme: dark) {
-      html.plainmail, body.plain { background: #121212; color: #e9e9e9; }
+      html.plainmail, body.plain { background: #1C1C1E; color: #e9e9e9; }
       body.plain a { color: #e9e9e9; }
-      html.htmlmail { filter: invert(1) hue-rotate(180deg); background: #fff; }
+      html.htmlmail { filter: invert(1) hue-rotate(180deg); background: #E3E3E1; }
+      html.htmlmail body { background: #E3E3E1; }
       html.htmlmail img, html.htmlmail video, html.htmlmail picture, html.htmlmail [style*="background-image"] { filter: invert(1) hue-rotate(180deg); }
     }
     """

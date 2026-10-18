@@ -355,8 +355,8 @@ struct SettingsView: View {
                     }
 
                     RetroGroup(tr("关于", "About")) {
-                        Text(tr("RetroMail 3.1\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
-                                "RetroMail 3.1\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
+                        Text(tr("RetroMail 3.2\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
+                                "RetroMail 3.2\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
                             .font(RT.font(12))
                             .fixedSize(horizontal: false, vertical: true)
                     }

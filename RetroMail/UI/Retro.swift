@@ -69,6 +69,7 @@ enum IOS3 {
     static let groupHeader = dyn("#4C566C", "#A9B2C2")
     static let groupHeaderShadow = dyn("#FFFFFF", "#000000")
     static let cell = dyn("#FFFFFF", "#1C1C1E")
+    static let cellBottom = dyn("#F3F4F6", "#18181A")
     static let secondary = dyn("#7F7F7F", "#8E8E93")
     static let value = dyn("#385487", "#8FB0E8")
     static let dateBlue = dyn("#2470D8", "#5E9BF2")
@@ -213,8 +214,7 @@ private struct BarButtonBody: View {
             .truncationMode(.tail)
             .padding(.leading, kind == .back ? 15 : 9)
             .padding(.trailing, 9)
-            .frame(minWidth: kind == .back ? 50 : 34, maxWidth: kind == .back ? 118 : 150, minHeight: 30)
-            .fixedSize(horizontal: false, vertical: true)
+            .frame(minWidth: kind == .back ? 50 : 34, minHeight: 30)
             .background {
                 if kind == .back {
                     ZStack {
@@ -237,22 +237,43 @@ private struct BarButtonBody: View {
     }
 }
 
-private struct LeadingWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
-}
+/// 导航栏布局：左右按钮按自身宽度（最多各占 38%，过长时截断），
+/// 标题居中且只使用剩下的空间，永远不会把页面撑出屏幕。
+struct NavBarLayout: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        CGSize(width: proposal.width ?? 320, height: 44)
+    }
 
-private struct TrailingWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+    func placeSubviews(in b: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count == 3 else { return }
+        let lead = subviews[0], title = subviews[1], trail = subviews[2]
+        let inset: CGFloat = 6
+        let maxSide = max(44, b.width * 0.38)
+        let ls = lead.sizeThatFits(ProposedViewSize(width: maxSide, height: 44))
+        let ts = trail.sizeThatFits(ProposedViewSize(width: maxSide, height: 44))
+        let lw = min(ls.width, maxSide), tw = min(ts.width, maxSide)
+        lead.place(at: CGPoint(x: b.minX + inset, y: b.midY), anchor: .leading,
+                   proposal: ProposedViewSize(width: lw, height: ls.height))
+        trail.place(at: CGPoint(x: b.maxX - inset, y: b.midY), anchor: .trailing,
+                    proposal: ProposedViewSize(width: tw, height: ts.height))
+        // 先试着正中居中；空间不够时放在两个按钮之间
+        let side = max(lw, tw) + inset + 8
+        var width = b.width - side * 2
+        var cx = b.midX
+        if width < 90 {
+            let left = b.minX + inset + lw + (lw > 0 ? 8 : 0)
+            let right = b.maxX - inset - tw - (tw > 0 ? 8 : 0)
+            width = max(0, right - left)
+            cx = left + width / 2
+        }
+        title.place(at: CGPoint(x: cx, y: b.midY), anchor: .center, proposal: ProposedViewSize(width: width, height: 44))
+    }
 }
 
 struct IOS3NavBar<Leading: View, Trailing: View>: View {
     let title: String
     let leading: Leading
     let trailing: Trailing
-    @State private var leadingWidth: CGFloat = 0
-    @State private var trailingWidth: CGFloat = 0
 
     init(title: String, @ViewBuilder leading: () -> Leading, @ViewBuilder trailing: () -> Trailing) {
         self.title = title
@@ -261,28 +282,18 @@ struct IOS3NavBar<Leading: View, Trailing: View>: View {
     }
 
     var body: some View {
-        ZStack {
-            HStack(spacing: 6) {
-                leading
-                    .background(GeometryReader { g in Color.clear.preference(key: LeadingWidthKey.self, value: g.size.width) })
-                Spacer(minLength: 0)
-                trailing
-                    .background(GeometryReader { g in Color.clear.preference(key: TrailingWidthKey.self, value: g.size.width) })
-            }
-            .padding(.horizontal, 6)
-            // 标题居中，并且两侧留出按钮的宽度，不会被按钮盖住
+        NavBarLayout {
+            HStack(spacing: 6) { leading }
             Text(title)
                 .font(RT.font(19, .bold))
                 .foregroundColor(IOS3.barText)
                 .shadow(color: IOS3.barTextShadow, radius: 0, x: 0, y: -1)
                 .lineLimit(1)
-                .minimumScaleFactor(0.6)
+                .minimumScaleFactor(0.65)
                 .truncationMode(.tail)
-                .padding(.horizontal, max(leadingWidth, trailingWidth) + 12)
                 .allowsHitTesting(false)
+            HStack(spacing: 6) { trailing }
         }
-        .onPreferenceChange(LeadingWidthKey.self) { leadingWidth = $0 }
-        .onPreferenceChange(TrailingWidthKey.self) { trailingWidth = $0 }
         .frame(height: 44)
         .frame(maxWidth: .infinity)
         .background(IOS3.bar.ignoresSafeArea(edges: .top))

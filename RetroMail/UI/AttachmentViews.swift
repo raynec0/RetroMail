@@ -210,6 +210,7 @@ struct EmbeddedMessageView: View {
     @State private var allowRemote = false
     @State private var compose: ComposeRequest?
     @State private var details = false
+    @State private var zoomOpen = false
 
     var body: some View {
         RetroPanel(display?.parsed.subject.isEmpty == false ? display!.parsed.subject : attachment.filename) {
@@ -242,6 +243,7 @@ struct EmbeddedMessageView: View {
                         ToolbarIcon(symbol: "arrowshape.turn.up.left", label: tr("回复", "Reply")) { start(.reply, d) }
                         ToolbarIcon(symbol: "arrowshape.turn.up.left.2", label: tr("全部回复", "Reply All")) { start(.replyAll, d) }
                         ToolbarIcon(symbol: "arrowshape.turn.up.right", label: tr("转发", "Forward")) { start(.forward, d) }
+                        ToolbarIcon(symbol: "arrow.up.left.and.arrow.down.right", label: tr("缩放查看", "Zoom")) { zoomOpen = true }
                     }
                 }
             } else {
@@ -262,6 +264,12 @@ struct EmbeddedMessageView: View {
             ComposeView(request: $0)
                 .environmentObject(settings)
                 .preferredColorScheme(settings.colorScheme)
+        }
+        .fullScreenCover(isPresented: $zoomOpen) {
+            if let d = display {
+                FullMessageViewer(title: d.parsed.subject, page: d.page(remote: true, hideQuotes: false))
+                    .preferredColorScheme(settings.colorScheme)
+            }
         }
     }
 

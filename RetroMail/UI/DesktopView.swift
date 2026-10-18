@@ -51,9 +51,7 @@ struct DesktopView: View {
                 }
                 toolbar
             }
-            .background {
-                if store.accounts.isEmpty { PinstripeBackground() } else { IOS3.cell.ignoresSafeArea() }
-            }
+            .background(PinstripeBackground())
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Route.self) { route in
                 switch route {
@@ -103,22 +101,48 @@ struct DesktopView: View {
         }
     }
 
-    // MARK: 邮箱列表
+    // MARK: 邮箱列表（iPhone OS 3 分组按钮）
 
     private var mailboxes: some View {
         ScrollView {
-            LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+            VStack(alignment: .leading, spacing: 22) {
                 ForEach(store.accounts) { a in
-                    Section {
-                        accountRows(a)
-                    } header: {
-                        PlainSectionHeader(title: a.name.isEmpty ? a.email : a.name,
-                                           trailing: a.name.isEmpty ? nil : a.email)
-                    }
+                    accountSection(a)
                 }
             }
+            .padding(.horizontal, 10)
+            .padding(.top, 14)
+            .padding(.bottom, 24)
         }
         .refreshable { await center.loadAll() }
+    }
+
+    private func accountSection(_ a: MailAccount) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .lastTextBaseline, spacing: 8) {
+                Text(a.name.isEmpty ? a.email : a.name)
+                    .font(RT.font(17, .bold))
+                    .lineLimit(1)
+                if !a.name.isEmpty {
+                    Text(a.email)
+                        .font(RT.font(13))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .opacity(0.8)
+                }
+                Spacer(minLength: 0)
+                if center.loadingAccounts.contains(a.id) {
+                    ProgressView().scaleEffect(0.7).tint(IOS3.groupHeader)
+                }
+            }
+            .foregroundColor(IOS3.groupHeader)
+            .shadow(color: IOS3.groupHeaderShadow, radius: 0, x: 0, y: 1)
+            .padding(.horizontal, 8)
+
+            GroupedBox {
+                accountRows(a)
+            }
+        }
     }
 
     @ViewBuilder
@@ -138,28 +162,22 @@ struct DesktopView: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(IOS3.cell)
-            .overlay(alignment: .bottom) { RetroDivider() }
         } else if let folders = center.folders[a.id] {
-            ForEach(folders.filter(\.selectable)) { f in
-                folderRow(a, f)
+            let shown = folders.filter(\.selectable)
+            ForEach(shown) { f in
+                Button {
+                    path.append(Route.folder(a, f))
+                } label: {
+                    MailboxRowLabel(folder: f, count: center.unread[center.unreadKey(a.id, f.path)] ?? 0,
+                                    last: f.id == shown.last?.id)
+                }
+                .buttonStyle(GroupedRowStyle())
             }
         } else {
             RetroBusy(text: tr("正在连接…", "Connecting…"))
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(IOS3.cell)
         }
-    }
-
-    private func folderRow(_ a: MailAccount, _ f: MailFolder) -> some View {
-        let count = center.unread[center.unreadKey(a.id, f.path)] ?? 0
-        return Button {
-            path.append(Route.folder(a, f))
-        } label: {
-            FolderRowLabel(folder: f, count: count)
-        }
-        .buttonStyle(InvertOnPressStyle())
     }
 
     // MARK: 底部工具栏
@@ -187,6 +205,76 @@ struct DesktopView: View {
             }
             .frame(width: 54)
             .disabled(store.accounts.isEmpty)
+        }
+    }
+}
+
+/// iPhone OS 3 分组表格的外框（白色圆角，灰色描边，下方一道白色高光）。
+struct GroupedBox<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            content
+        }
+        .background(IOS3.cell)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(IOS3.groupBorder, lineWidth: 1))
+        .shadow(color: IOS3.groupHeaderShadow.opacity(0.6), radius: 0, x: 0, y: 1)
+    }
+}
+
+/// 分组里的一行：像一个按钮——浅浅的渐变底，按下时变成 iOS 蓝。
+struct GroupedRowStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(configuration.isPressed ? .white : .ink)
+            .environment(\.rowPressed, configuration.isPressed)
+            .background {
+                if configuration.isPressed {
+                    IOS3.selection
+                } else {
+                    LinearGradient(colors: [IOS3.cell, IOS3.cellBottom], startPoint: .top, endPoint: .bottom)
+                }
+            }
+    }
+}
+
+/// 邮箱列表的一行：光泽小图标 + 名称 + 未读数 + 箭头。
+struct MailboxRowLabel: View {
+    let folder: MailFolder
+    let count: Int
+    var last = false
+    @Environment(\.rowPressed) private var pressed
+
+    var body: some View {
+        let nested = folder.depth > 0
+        HStack(spacing: 10) {
+            if nested {
+                Color.clear.frame(width: CGFloat(folder.depth) * 16)
+            }
+            GlossyIcon(symbol: folder.role.springSymbol, colors: folder.iconColors, size: nested ? 25 : 29)
+                .scaleEffect(0.98)
+            Text(folder.displayName)
+                .font(RT.font(nested ? 16 : 17, .bold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 6)
+            if count > 0 { CountPill(count: count) }
+            Chevron()
+        }
+        .padding(.leading, 9)
+        .padding(.trailing, 10)
+        .frame(minHeight: nested ? 42 : 46)
+        .contentShape(Rectangle())
+        .overlay(alignment: .bottom) {
+            if !last {
+                Rectangle().fill(pressed ? Color.clear : IOS3.groupBorder).frame(height: 1)
+            }
         }
     }
 }
@@ -226,7 +314,7 @@ struct AboutBox: View {
         RetroDialog {
             VStack(spacing: 10) {
                 Text("RetroMail").font(RT.font(18, .bold))
-                Text(tr("版本 3.1", "Version 3.1")).font(RT.font(14))
+                Text(tr("版本 3.2", "Version 3.2")).font(RT.font(14))
                 Text(tr("iPhone OS 3 风格的邮件客户端。\nIMAP · SMTP · 会话 · 富文本 · AI",
                         "A mail client in the style of iPhone OS 3.\nIMAP · SMTP · Threads · Rich text · AI"))
                     .font(RT.font(14))

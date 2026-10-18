@@ -296,17 +296,15 @@ struct ConversationView: View {
                 .environmentObject(settings)
                 .preferredColorScheme(settings.colorScheme)
         }
-        .sheet(item: $fullscreen) { item in
-            RetroPanel(item.parsed?.subject ?? "") {
-                if let d = item.display {
-                    HTMLView(html: d.page(remote: true, hideQuotes: false)) { addr in
-                        fullscreen = nil
-                        compose = ComposeRequest(account: model.account, to: addr)
-                    }
-                    .background(Color.white)
+        .fullScreenCover(item: $fullscreen) { item in
+            if let d = item.display {
+                FullMessageViewer(title: d.parsed.subject.isEmpty ? tr("邮件", "Message") : d.parsed.subject,
+                                  page: d.page(remote: true, hideQuotes: false)) { addr in
+                    fullscreen = nil
+                    compose = ComposeRequest(account: model.account, to: addr)
                 }
+                .preferredColorScheme(settings.colorScheme)
             }
-            .preferredColorScheme(settings.colorScheme)
         }
         .sheet(item: $invite) { att in
             CalendarInviteView(data: att.data, account: model.account)
@@ -415,6 +413,7 @@ struct ConversationView: View {
                 }
             },
             onInvite: { invite = $0 },
+            onZoom: { fullscreen = item },
             onMailto: { addr in compose = ComposeRequest(account: model.account, to: addr) }
         )
     }
@@ -497,10 +496,12 @@ struct MessageCard: View {
     let onActions: () -> Void
     let onMarkUnread: () -> Void
     let onInvite: (MailAttachment) -> Void
+    let onZoom: () -> Void
     let onMailto: (String) -> Void
 
     @EnvironmentObject private var settings: AppSettings
     @State private var height: CGFloat = 1
+    @State private var shrunk = false
     @State private var showQuotes = false
     @State private var quoteFound = false
     @State private var allowRemote = false
@@ -551,9 +552,28 @@ struct MessageCard: View {
                         .padding(.horizontal, 12)
                         .padding(.top, 8)
                 }
+                if shrunk {
+                    Button(action: onZoom) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus.magnifyingglass")
+                            Text(tr("邮件较宽，已缩小显示 · 点此放大查看", "Wide message shrunk to fit · Tap to zoom"))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                        }
+                        .font(RT.font(13, .bold))
+                        .foregroundColor(IOS3.dateBlue)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+                    }
+                    .buttonStyle(.plain)
+                }
                 AutoHeightHTMLView(html: d.page(remote: allowRemote, hideQuotes: hide),
                                    hideQuotes: hide,
                                    height: $height,
+                                   onScaled: { z in
+                                       let s = z < 0.95
+                                       if s != shrunk { shrunk = s }
+                                   },
                                    onQuoteDetected: { found in if found && !quoteFound { quoteFound = true } },
                                    onMailto: onMailto)
                     .frame(height: max(height, 44))
@@ -663,6 +683,13 @@ struct MessageCard: View {
                     .buttonStyle(.plain)
                     .foregroundColor(IOS3.chevron)
                 }
+                Button(action: onZoom) {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right.circle").font(.system(size: 22))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(IOS3.value)
+                .disabled(item.display == nil)
+                .accessibilityLabel(tr("全屏缩放查看", "Full screen zoom"))
                 Button(action: onActions) {
                     Image(systemName: "arrowshape.turn.up.left.circle").font(.system(size: 24))
                 }
