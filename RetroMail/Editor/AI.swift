@@ -4,11 +4,12 @@ import UIKit
 // MARK: - 配置
 
 enum AIProvider: String, Codable, CaseIterable, Identifiable {
-    case openai, anthropic, apple, handoff
+    case chatgpt, openai, anthropic, apple, handoff
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .chatgpt: return tr("ChatGPT 订阅（账号登录）", "ChatGPT Subscription (Sign In)")
         case .openai: return tr("OpenAI 兼容", "OpenAI-compatible")
         case .anthropic: return "Anthropic"
         case .apple: return tr("Apple 本机 AI", "Apple On-Device")
@@ -18,6 +19,7 @@ enum AIProvider: String, Codable, CaseIterable, Identifiable {
 
     var detail: String {
         switch self {
+        case .chatgpt: return tr("用 ChatGPT 账号登录（OpenAI 官方“Sign in with ChatGPT”），直接用你的 Plus / Pro 订阅额度，不需要 API Key。", "Sign in with your ChatGPT account (OpenAI's official Sign in with ChatGPT) and use your Plus / Pro plan — no API key.")
         case .openai: return tr("API Key，按量计费。DeepSeek、通义、Kimi、智谱、中转服务都可以。", "API key, pay as you go. Works with DeepSeek, Qwen, Kimi, relays…")
         case .anthropic: return tr("Claude 的 API Key，按量计费。", "Claude API key, pay as you go.")
         case .apple: return tr("iPhone 上的 Apple 智能模型，免费、离线、不上传邮件。需要 iOS 26 和支持 Apple 智能的机型。", "Apple Intelligence model on your iPhone: free, offline, private. Needs iOS 26 on a supported device.")
@@ -67,6 +69,8 @@ struct AIConfig: Codable, Equatable {
     var model = ""
     /// 用订阅时打开的 App（新字段必须可选，旧设置才能正常读出）
     var handoffApp: AIHandoffApp?
+    /// ChatGPT 订阅登录时用的模型
+    var chatgptModel: String?
 
     var app: AIHandoffApp { handoffApp ?? .chatgpt }
 
@@ -74,6 +78,7 @@ struct AIConfig: Codable, Equatable {
     var summary: String {
         switch provider {
         case .openai, .anthropic: return model
+        case .chatgpt: return "ChatGPT" + ((chatgptModel?.isEmpty == false) ? " · " + chatgptModel! : "")
         case .apple: return provider.label
         case .handoff: return app.name + tr("（订阅）", " (subscription)")
         }
@@ -107,6 +112,7 @@ struct AIConfig: Codable, Equatable {
         case .openai, .anthropic: return !c.baseURL.isEmpty && !c.model.isEmpty && !apiKey.isEmpty
         case .apple: return AppleAI.availability == nil
         case .handoff: return true
+        case .chatgpt: return Keychain.get("chatgpt.credentials") != nil
         }
     }
 }
@@ -166,6 +172,8 @@ enum AIClient {
             return try clean(try await AppleAI.complete(system: system, user: user))
         case .handoff:
             return try clean(try await AIHandoff.shared.run(system: system, user: user, app: config.app))
+        case .chatgpt:
+            return try clean(try await ChatGPTAuth.shared.complete(system: system, user: user, model: config.chatgptModel))
         case .openai, .anthropic:
             break
         }
@@ -176,7 +184,7 @@ enum AIClient {
         let urlString: String
         var body: [String: Any]
         switch config.provider {
-        case .openai, .apple, .handoff:
+        case .openai, .apple, .handoff, .chatgpt:
             urlString = base.hasSuffix("/chat/completions") ? base : base + "/chat/completions"
             body = [
                 "model": config.model,
@@ -203,7 +211,7 @@ enum AIClient {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         switch config.provider {
-        case .openai, .apple, .handoff:
+        case .openai, .apple, .handoff, .chatgpt:
             req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         case .anthropic:
             req.setValue(key, forHTTPHeaderField: "x-api-key")
@@ -224,7 +232,7 @@ enum AIClient {
 
         var text = ""
         switch config.provider {
-        case .openai, .apple, .handoff:
+        case .openai, .apple, .handoff, .chatgpt:
             if let choices = json?["choices"] as? [[String: Any]],
                let msg = choices.first?["message"] as? [String: Any] {
                 if let s = msg["content"] as? String {
@@ -720,6 +728,7 @@ struct AISettingsSheet: View {
                     case .openai, .anthropic: apiGroup
                     case .apple: appleGroup
                     case .handoff: handoffGroup
+                    case .chatgpt: chatgptGroup
                     }
                     HStack(spacing: 12) {
                         Spacer()
@@ -770,6 +779,10 @@ struct AISettingsSheet: View {
         }
     }
 
+    private var chatgptGroup: some View {
+        ChatGPTSignInGroup(model: Binding(get: { config.chatgptModel ?? "" }, set: { config.chatgptModel = $0 }))
+    }
+
     private var appleGroup: some View {
         RetroGroup(tr("Apple 本机 AI", "Apple On-Device AI")) {
             Text(AppleAI.availability ?? tr("✓ 这台 iPhone 可以使用。邮件内容只在手机上处理。", "✓ Available on this iPhone. Mail is processed on the device only."))
@@ -798,11 +811,11 @@ struct AISettingsSheet: View {
             Text(tr("""
             用法：点 AI 功能后会自动打开 \(config.app.name)，提示词已经填好（或已复制，粘贴即可）。它回答完后，复制回答，回到 RetroMail 点“粘贴回答”，结果就会放进邮件里。
 
-            这样用的是你在官方 App 里登录的订阅，RetroMail 不保存也不接触你的账号或登录令牌。ChatGPT、Claude 等服务商不允许第三方应用直接使用订阅账号的令牌调用模型（有封号风险），所以这里采用“交给官方 App 生成”的方式。
+            这样用的是你在官方 App 里登录的订阅。ChatGPT 可以直接选上面的“ChatGPT 订阅（账号登录）”，更方便；Claude、Gemini 等的订阅不开放给第三方应用登录，就用这种方式。
             """, """
             How it works: tapping an AI action opens \(config.app.name) with the prompt filled in (or copied — just paste). When it answers, copy the reply, return to RetroMail and tap Paste Answer.
 
-            This uses the subscription you're signed into in the official app. RetroMail never stores or touches your account or tokens — providers don't allow third-party apps to call models with subscription tokens (accounts can be banned), so the work is handed to the official app instead.
+            This uses the subscription you're signed into in the official app. For ChatGPT, the “ChatGPT Subscription (Sign In)” option above is easier; Claude, Gemini and others don't offer subscription sign-in to third-party apps, so use this instead.
             """))
                 .font(RT.font(12))
                 .fixedSize(horizontal: false, vertical: true)

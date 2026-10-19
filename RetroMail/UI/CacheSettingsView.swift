@@ -8,12 +8,12 @@ struct CacheSettingsView: View {
     @State private var folderName = CacheArchive.folderDisplayName
     @State private var configured = CacheArchive.isConfigured
     @State private var autoDays = CacheArchive.autoDays
-    @State private var showPicker = false
     @State private var busy = false
     @State private var message: String?
     @State private var confirmClearLocal = false
     @State private var confirmClearArchive = false
     @State private var offloadAge = 0
+    @State private var deleteAfterExport = true
 
     var body: some View {
         RetroScreen(title: tr("存储", "Storage"), back: tr("设置", "Settings")) {
@@ -38,7 +38,7 @@ struct CacheSettingsView: View {
                                 Text(folderName).font(RT.font(13)).foregroundColor(IOS3.value).lineLimit(1)
                             }
                             Spacer()
-                            Button(configured ? tr("更改…", "Change…") : tr("选择…", "Choose…")) { showPicker = true }
+                            Button(configured ? tr("更改…", "Change…") : tr("选择…", "Choose…")) { pickFolder() }
                                 .buttonStyle(RetroButtonStyle(isDefault: !configured, compact: true))
                         }
                         .padding(.horizontal, 12)
@@ -76,7 +76,25 @@ struct CacheSettingsView: View {
                         }
                     }
 
+                    RetroGroup(tr("导出到 iCloud 云盘（压缩包）", "Export to iCloud Drive (zip)")) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(tr("不想设置存档文件夹的话，也可以把缓存的邮件打成一个压缩包，存到 iCloud 云盘或任何位置（每封邮件是一个 .eml 文件，电脑上的邮件程序也能打开）。",
+                                    "Or pack the cached messages into one .zip and save it to iCloud Drive or anywhere (each message is an .eml file your computer's mail app can open)."))
+                                .font(RT.font(12))
+                                .fixedSize(horizontal: false, vertical: true)
+                            IOS3Segmented(options: [(0, tr("全部", "All")), (7, tr("7 天前", "> 7 days")),
+                                                    (30, tr("30 天前", "> 30 days")), (90, tr("90 天前", "> 90 days"))],
+                                          selection: $offloadAge)
+                            RetroCheckbox(label: tr("存好后删除本机副本（以后打开会从服务器重新下载）", "Delete local copies after saving (re-downloaded from the server when opened)"), isOn: $deleteAfterExport)
+                            Button(tr("导出压缩包…", "Export Zip…")) { exportZip() }
+                                .buttonStyle(RetroButtonStyle(isDefault: !configured))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .padding(12)
+                    }
+
                     Text(tr("""
+                    选择存档文件夹：在弹出的“文件”里进入 iCloud 云盘，打开（或新建后打开）你想用的文件夹，再点右上角“打开”。
                     转存后本机只留邮件列表，邮件原文和附件放到你选的文件夹（建议选 iCloud 云盘里的一个文件夹）。打开转存过的邮件时会从那里读取；如果 iCloud 还没下载到手机上，会改为从邮件服务器重新下载，所以不会丢邮件。
                     邮件仍然保存在邮件服务器上，转存只是为了腾出手机空间。自签安装的应用无法直接使用 iCloud 容器，所以用“文件”里的文件夹来实现。
                     """, """
@@ -94,17 +112,6 @@ struct CacheSettingsView: View {
         }
         .busyOverlay(busy, tr("正在转存…", "Moving…"))
         .retroAlert($message)
-        .sheet(isPresented: $showPicker) {
-            FolderPicker { url in
-                do {
-                    try CacheArchive.setFolder(url)
-                    reload()
-                } catch {
-                    message = error.localizedDescription
-                }
-            }
-            .ignoresSafeArea()
-        }
         .ios3ActionSheet(isPresented: $confirmClearLocal,
                          title: tr("会删除本机上的全部离线缓存（列表和邮件）。存档和服务器上的邮件不受影响。",
                                    "Deletes all offline data on this phone. The archive and your server mail are not affected."),
@@ -147,6 +154,45 @@ struct CacheSettingsView: View {
             localSize = total
             mailSize = mail
             archive = arch
+        }
+    }
+
+    private func pickFolder() {
+        FilesPresenter.pickFolder { url in
+            do {
+                try CacheArchive.setFolder(url)
+                reload()
+                message = tr("✓ 已设置存档文件夹：", "✓ Archive folder set: ") + CacheArchive.folderDisplayName
+            } catch {
+                message = error.localizedDescription
+                reload()
+            }
+        }
+    }
+
+    private func exportZip() {
+        busy = true
+        let age = offloadAge
+        let remove = deleteAfterExport
+        Task {
+            let r = await Task.detached { () -> Result<(zip: URL, files: [DiskCache.RawFile], bytes: Int), Error> in
+                do { return .success(try CacheArchive.makeZip(olderThanDays: age)) } catch { return .failure(error) }
+            }.value
+            busy = false
+            switch r {
+            case .failure(let e):
+                message = e.localizedDescription
+            case .success(let pack):
+                FilesPresenter.export(pack.zip) { saved in
+                    try? FileManager.default.removeItem(at: pack.zip.deletingLastPathComponent())
+                    guard saved else { return }
+                    if remove { CacheArchive.removeLocal(pack.files) }
+                    message = remove
+                        ? tr("已保存 \(pack.files.count) 封邮件，并腾出 \(Fmt.size(pack.bytes))。", "Saved \(pack.files.count) messages and freed \(Fmt.size(pack.bytes)).")
+                        : tr("已保存 \(pack.files.count) 封邮件。", "Saved \(pack.files.count) messages.")
+                    reload()
+                }
+            }
         }
     }
 

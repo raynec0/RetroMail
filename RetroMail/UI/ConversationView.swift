@@ -35,7 +35,12 @@ final class ConversationModel: ObservableObject {
         self.list = list
         let path = list.folder.path
         items = conversation.messages
-            .map { ThreadItem(folder: path, summary: $0) }
+            .map { m -> ThreadItem in
+                var x = m
+                let f = x.folderPath ?? path
+                x.folderPath = nil
+                return ThreadItem(folder: f, summary: x)
+            }
             .sorted { $0.summary.received < $1.summary.received }
         if let last = items.last { expanded = [last.id] }
     }
@@ -179,7 +184,7 @@ final class ConversationModel: ObservableObject {
             let path = item.folder
             let uid = item.summary.uid
             do {
-                try await list.client.perform { try await $0.delete(path, uids: [uid], trash: trash) }
+                _ = try await list.client.perform { try await $0.delete(path, uids: [uid], trash: trash) }
             } catch {
                 self.error = error.localizedDescription
             }
@@ -530,8 +535,18 @@ struct ConversationView: View {
 
     private var toolbar: some View {
         IOS3Toolbar {
-            ToolbarIcon(symbol: "arrow.clockwise", label: tr("刷新", "Refresh")) {
-                Task { await model.list.refresh() }
+            if MailCenter.shared.folder(model.account, role: .archive) != nil && model.list.folder.role != .archive {
+                ToolbarIcon(symbol: "archivebox", label: tr("归档", "Archive")) {
+                    let uids = model.currentUIDs
+                    Task {
+                        await model.list.archive(uids)
+                        dismiss()
+                    }
+                }
+            } else {
+                ToolbarIcon(symbol: "arrow.clockwise", label: tr("刷新", "Refresh")) {
+                    Task { await model.list.refresh() }
+                }
             }
             ToolbarIcon(symbol: "folder", label: tr("移动", "Move")) { showMove = true }
             ToolbarIcon(symbol: "trash", label: tr("删除", "Delete")) { showDelete = true }

@@ -7,6 +7,7 @@ enum Route: Hashable {
     case folderEdit(MailAccount, MailFolder?, parent: MailFolder?)
     case followUps
     case followUpMessage(String)
+    case message(MailAccount, MailFolder, MessageSummary)
 }
 
 extension FolderRole {
@@ -72,6 +73,8 @@ struct DesktopView: View {
                     FollowUpBoardView()
                 case .followUpMessage(let id):
                     FollowUpMessageView(id: id)
+                case .message(let a, let f, let m):
+                    MessageHostView(account: a, folder: f, summary: m)
                 }
             }
         }
@@ -83,9 +86,45 @@ struct DesktopView: View {
         .overlay {
             if showAbout { AboutBox { showAbout = false } }
         }
+        .overlay(alignment: .bottom) {
+            if let t = center.toast {
+                ToastView(toast: t) { center.toast = nil }
+                    .padding(.bottom, 64)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: center.toast)
+        .onChange(of: center.openRequest) { req in
+            guard let r = req else { return }
+            center.openRequest = nil
+            open(r)
+        }
+        .onChange(of: center.openFollowUp) { id in
+            guard let id = id else { return }
+            center.openFollowUp = nil
+            path = NavigationPath()
+            path.append(Route.followUps)
+            path.append(Route.followUpMessage(id))
+        }
         .sheetHost()
         .task {
             await center.loadAll()
+        }
+    }
+
+    /// 点了新邮件通知：打开那封邮件（先进收件箱，返回时就在列表里）。
+    private func open(_ r: OpenRequest) {
+        guard let a = store.accounts.first(where: { $0.id == r.account }) else { return }
+        let folder = center.folders[a.id]?.first { $0.path == r.folder } ?? MailFolder(path: r.folder, delimiter: nil, flags: [])
+        path = NavigationPath()
+        path.append(Route.folder(a, folder))
+        Task {
+            var summary = DiskCache.loadList(account: a.id, folder: r.folder).first { $0.uid == r.uid }
+            if summary == nil {
+                let c = center.client(for: a, .interactive)
+                summary = (try? await c.perform { try await $0.fetchSince(r.folder, uid: r.uid) })?.first { $0.uid == r.uid }
+            }
+            if let m = summary { path.append(Route.message(a, folder, m)) }
         }
     }
 
@@ -275,7 +314,10 @@ struct DesktopView: View {
     private var toolbar: some View {
         IOS3Toolbar {
             ToolbarIcon(symbol: "arrow.clockwise", label: tr("刷新", "Refresh")) {
-                Task { await center.loadAll() }
+                Task {
+                    await center.loadAll()
+                    await center.checkAll(lists: false)
+                }
             }
             .frame(width: 54)
             .disabled(store.accounts.isEmpty)
@@ -504,6 +546,39 @@ struct FolderRowLabel: View {
     }
 }
 
+/// 底部黑色半透明提示条，带“撤销”。
+struct ToastView: View {
+    let toast: MailToast
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(toast.text)
+                .font(RT.font(15, .bold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+            if let undo = toast.undo {
+                Button(tr("撤销", "Undo")) {
+                    undo()
+                    onClose()
+                }
+                .font(RT.font(15, .bold))
+                .foregroundColor(HexColor.color("#8FC1FF"))
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.black.opacity(0.78))
+        )
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.white.opacity(0.25), lineWidth: 1))
+        .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: 3)
+        .onTapGesture { onClose() }
+    }
+}
+
 struct AboutBox: View {
     let onClose: () -> Void
 
@@ -511,7 +586,7 @@ struct AboutBox: View {
         RetroDialog {
             VStack(spacing: 10) {
                 Text("RetroMail").font(RT.font(18, .bold))
-                Text(tr("版本 3.4", "Version 3.4")).font(RT.font(14))
+                Text(tr("版本 3.5", "Version 3.5")).font(RT.font(14))
                 Text(tr("iPhone OS 3 风格的邮件客户端。\nIMAP · SMTP · 会话 · 富文本 · AI",
                         "A mail client in the style of iPhone OS 3.\nIMAP · SMTP · Threads · Rich text · AI"))
                     .font(RT.font(14))

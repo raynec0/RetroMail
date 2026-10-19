@@ -21,6 +21,8 @@ final class MessageListModel: ObservableObject {
     /// 服务器上这个邮箱的邮件总数
     @Published var total = 0
     @Published private(set) var loadingMore = false
+    /// 上次成功刷新的时间
+    @Published var updatedAt: Date?
     private var previewTasks: [Task<Void, Never>] = []
     private var previewRequested: Set<Int> = []
     private var didInitialLoad = false
@@ -28,6 +30,7 @@ final class MessageListModel: ObservableObject {
     init(account: MailAccount, folder: MailFolder) {
         self.account = account
         self.folder = folder
+        Self.live.append(Weak(self))
     }
 
     /// 打开邮件、标记、删除等用户正在等待的操作。
@@ -37,9 +40,67 @@ final class MessageListModel: ObservableObject {
     var visible: [MessageSummary] { searchResults ?? messages }
 
     /// 按会话分组（关闭分组时每封邮件单独一行），按最近收到时间排序。
+    /// 收件箱等文件夹会把“已发送”里你的回复并进对应的会话（只并入已有会话，不单独成行）。
     func regroup() {
-        let list = visible.sorted(by: MessageSummary.newestFirst)
-        conversations = AppSettings.shared.threaded ? Threading.group(list) : list.map { Conversation(messages: [$0]) }
+        guard AppSettings.shared.threaded else {
+            conversations = visible.sorted(by: MessageSummary.newestFirst).map { Conversation(messages: [$0]) }
+            return
+        }
+        let ownIds = Set(visible.compactMap(\.messageId))
+        let extras = mergesSent ? sentReplies.filter { m in m.messageId.map { !ownIds.contains($0) } ?? true } : []
+        let list = (visible + extras).sorted(by: MessageSummary.newestFirst)
+        conversations = Threading.group(list).filter { !$0.own.isEmpty }
+    }
+
+    /// 是否把“已发送”里的回复并入会话
+    var mergesSent: Bool {
+        searchResults == nil && ![.sent, .drafts, .trash, .junk].contains(folder.role)
+    }
+
+    /// 最近的“已发送”邮件（标记了 folderPath）
+    @Published private(set) var sentReplies: [MessageSummary] = [] {
+        didSet { regroup() }
+    }
+
+    private func loadSentReplies() async {
+        guard mergesSent, AppSettings.shared.threaded,
+              let sent = MailCenter.shared.folder(account, role: .sent) else { return }
+        let path = sent.path
+        func tag(_ list: [MessageSummary]) -> [MessageSummary] {
+            list.map { var m = $0; m.folderPath = path; return m }
+        }
+        if sentReplies.isEmpty {
+            let cached = DiskCache.loadList(account: account.id, folder: path)
+            if !cached.isEmpty { sentReplies = tag(cached) }
+        }
+        let c = MailCenter.shared.client(for: account, .background)
+        if let r = try? await c.perform({ try await $0.fetchLatest(path, limit: 80) }) {
+            sentReplies = tag(r.messages)
+            DiskCache.saveList(Array(r.messages.prefix(120)), account: account.id, folder: path)
+        }
+    }
+
+    // MARK: 当前打开的列表（新邮件、移动后立即更新）
+
+    private final class Weak { weak var model: MessageListModel?; init(_ m: MessageListModel) { model = m } }
+    private static var live: [Weak] = []
+
+    static func liveModels() -> [MessageListModel] {
+        live.removeAll { $0.model == nil }
+        return live.compactMap(\.model)
+    }
+
+    static func liveModel(account: UUID, folder: String) -> MessageListModel? {
+        liveModels().first { $0.account.id == account && $0.folder.path == folder }
+    }
+
+    /// 别处把邮件移进了这个文件夹：先插到列表里，等服务器确认后再刷新。
+    func insertMoved(_ list: [MessageSummary]) {
+        let existing = Set(messages.map(\.uid))
+        let fresh = list.filter { !existing.contains($0.uid) }
+        guard !fresh.isEmpty else { return }
+        messages = (messages + fresh).sorted(by: MessageSummary.newestFirst)
+        total += fresh.count
     }
 
     func initialLoad() async {
@@ -48,6 +109,7 @@ final class MessageListModel: ObservableObject {
         messages = DiskCache.loadList(account: account.id, folder: folder.path).sorted(by: MessageSummary.newestFirst)
         // 缓存里已有的邮件马上开始补预览，不用等列表刷新完
         loadPreviews()
+        Task { await self.loadSentReplies() }
         await refresh()
     }
 
@@ -61,9 +123,11 @@ final class MessageListModel: ObservableObject {
                 return (r, c.selectedExists)
             }
             messages = keepPreviews(result.messages).sorted(by: MessageSummary.newestFirst)
+            updatedAt = Date()
             hasMore = result.hasMore
             total = count
             loadPreviews()
+            if mergesSent { Task { await self.loadSentReplies() } }
             DiskCache.saveList(Array(messages.prefix(120)), account: account.id, folder: path)
             if folder.role == .inbox, let top = messages.map(\.uid).max() {
                 BackgroundRefresh.noteSeen(account: account.id, nextUID: top + 1)
@@ -243,21 +307,51 @@ final class MessageListModel: ObservableObject {
     }
 
     func delete(_ uids: [Int]) async {
-        let unseenRemoved = visible.filter { uids.contains($0.uid) && !$0.seen }.count
+        let removed = visible.filter { uids.contains($0.uid) }
+        let unseenRemoved = removed.filter { !$0.seen }.count
         remove(uids)
         MailCenter.shared.adjustUnread(account, folder.path, by: -unseenRemoved)
-        let trash = MailCenter.shared.folder(account, role: .trash)?.path
+        let trashFolder = MailCenter.shared.folder(account, role: .trash)
+        let trash = trashFolder?.path
         let path = folder.path
-        await sync { try await $0.delete(path, uids: uids, trash: trash) }
+        do {
+            let map = try await client.perform { try await $0.delete(path, uids: uids, trash: trash) }
+            if let t = trashFolder, t.path != path {
+                MailCenter.shared.didMove(account, from: path, to: t, messages: removed, uidMap: map, announce: true, deleted: true)
+            }
+        } catch {
+            self.error = error.localizedDescription
+            await refresh()
+        }
     }
 
-    func move(_ uids: [Int], to dest: MailFolder) async {
+    func move(_ uids: [Int], to dest: MailFolder, announce: Bool = true) async {
+        let moved = visible.filter { uids.contains($0.uid) }
+        let unseen = moved.filter { !$0.seen }.count
         remove(uids)
+        MailCenter.shared.adjustUnread(account, folder.path, by: -unseen)
+        MailCenter.shared.adjustUnread(account, dest.path, by: unseen)
         let path = folder.path
-        await sync { try await $0.move(path, uids: uids, to: dest.path) }
+        do {
+            let map = try await client.perform { try await $0.move(path, uids: uids, to: dest.path) }
+            MailCenter.shared.didMove(account, from: path, to: dest, messages: moved, uidMap: map, announce: announce)
+        } catch {
+            self.error = error.localizedDescription
+            await refresh()
+        }
         let acc = account
         let paths = [path, dest.path]
         Task { await MailCenter.shared.refreshUnread(acc, paths: paths) }
+    }
+
+    /// 归档：移到“归档”文件夹（没有时提示）。
+    func archive(_ uids: [Int]) async {
+        guard let dest = MailCenter.shared.folder(account, role: .archive) else {
+            error = tr("没有找到“归档”文件夹。可以在首页“编辑”里新建一个名为“归档”或 Archive 的邮箱。",
+                       "No Archive folder was found. Create one named “Archive” from Edit on the home screen.")
+            return
+        }
+        await move(uids, to: dest)
     }
 
     private func sync(_ op: (IMAPConnection) async throws -> Void) async {
@@ -292,6 +386,9 @@ struct MessageListView: View {
     }
 
     private var showRecipients: Bool { folder.role == .sent || folder.role == .drafts }
+    private var hasArchive: Bool {
+        folder.role != .archive && center.folder(account, role: .archive) != nil
+    }
 
     private var unread: Int {
         center.unread[center.unreadKey(account.id, folder.path)] ?? model.messages.filter { !$0.seen }.count
@@ -430,7 +527,7 @@ struct MessageListView: View {
         } label: {
             ConversationRow(conversation: c, selecting: selecting, selected: isSelected,
                             showRecipients: showRecipients, threaded: settings.threaded, myEmail: account.email,
-                            followUp: followUps.item(account: account.id, folder: model.folder.path, summary: c.latest))
+                            followUp: followUps.item(account: account.id, folder: model.folder.path, summary: c.ownLatest))
         }
         .buttonStyle(InvertOnPressStyle())
         .listRowInsets(EdgeInsets())
@@ -443,6 +540,14 @@ struct MessageListView: View {
                 Text(tr("删除", "Delete"))
             }
             .tint(HexColor.color("#D23426"))
+            if hasArchive {
+                Button {
+                    Task { await model.archive(c.uids) }
+                } label: {
+                    Text(tr("归档", "Archive"))
+                }
+                .tint(HexColor.color("#5B8F3A"))
+            }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
             Button {
@@ -493,7 +598,7 @@ struct MessageListView: View {
                 }
             }
             .frame(width: 54)
-            ToolbarStatus(text: model.loading ? tr("正在检查邮件…", "Checking for Mail…") : Fmt.updated(updatedAt))
+            ToolbarStatus(text: model.loading ? tr("正在检查邮件…", "Checking for Mail…") : Fmt.updated(model.updatedAt ?? updatedAt))
             ToolbarIcon(symbol: "square.and.pencil", label: tr("新邮件", "Compose")) {
                 compose = ComposeRequest(account: account)
             }
@@ -510,7 +615,13 @@ struct MessageListView: View {
                     .buttonStyle(BarButtonStyle(kind: .red))
                     .frame(maxWidth: .infinity)
                     .disabled(selection.isEmpty)
-                Button(tr("移动", "Move") + n) { showMove = true }
+                if hasArchive {
+                    Button(tr("归档", "Archive")) { finish { await model.archive(uids) } }
+                        .buttonStyle(BarButtonStyle())
+                        .frame(maxWidth: .infinity)
+                        .disabled(selection.isEmpty)
+                }
+                Button(tr("移动", "Move")) { showMove = true }
                     .buttonStyle(BarButtonStyle())
                     .frame(maxWidth: .infinity)
                     .disabled(selection.isEmpty)
@@ -598,7 +709,7 @@ struct ConversationRow: View {
             VStack(spacing: 6) {
                 if unread {
                     UnreadDot()
-                } else if conversation.answered {
+                } else if conversation.answered || conversation.includesMyReplies {
                     Image(systemName: "arrowshape.turn.up.left.fill")
                         .font(.system(size: 10))
                         .foregroundColor(gray)

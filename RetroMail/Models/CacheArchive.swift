@@ -23,6 +23,17 @@ enum CacheArchive {
         defer { if ok { url.stopAccessingSecurityScopedResource() } }
         let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
         UserDefaults.standard.set(data, forKey: bookmarkKey)
+        // 立即试写一次，确认这个文件夹真的能用
+        do {
+            try withFolder { root -> Void in
+                let probe = root.appendingPathComponent(".retromail-test")
+                try Data("ok".utf8).write(to: probe)
+                try? FileManager.default.removeItem(at: probe)
+            }
+        } catch {
+            forget()
+            throw MailError.protocolError(tr("这个文件夹无法写入：", "Can't write to this folder: ") + error.localizedDescription)
+        }
     }
 
     static func forget() {
@@ -197,27 +208,111 @@ extension DiskCache {
     }
 }
 
-/// 在“文件”里选一个文件夹。
-struct FolderPicker: UIViewControllerRepresentable {
-    let onPick: (URL) -> Void
+// MARK: - 直接用 UIKit 弹出“文件”选择器（放在 SwiftUI 的 sheet 里会留下空白页、选不中）
 
-    func makeCoordinator() -> Coordinator { Coordinator(onPick) }
-
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let vc = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
-        vc.allowsMultipleSelection = false
-        vc.delegate = context.coordinator
-        return vc
+@MainActor
+enum FilesPresenter {
+    /// iCloud 云盘根目录（让选择器一打开就在 iCloud 云盘里）
+    static var iCloudDriveURL: URL {
+        URL(fileURLWithPath: "/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
     }
 
-    func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
+    private static var keep: [NSObject] = []
 
-    final class Coordinator: NSObject, UIDocumentPickerDelegate {
-        let onPick: (URL) -> Void
-        init(_ onPick: @escaping (URL) -> Void) { self.onPick = onPick }
+    static func topController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let window = scenes.flatMap(\.windows).first { $0.isKeyWindow } ?? scenes.first?.windows.first
+        var top = window?.rootViewController
+        while let p = top?.presentedViewController { top = p }
+        return top
+    }
+
+    /// 选一个文件夹：进入要用的文件夹后，点右上角“打开”。
+    static func pickFolder(_ done: @escaping (URL) -> Void) {
+        let vc = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
+        vc.allowsMultipleSelection = false
+        vc.directoryURL = iCloudDriveURL
+        let d = Delegate { urls in
+            if let u = urls.first { done(u) }
+        }
+        keep = [d]
+        vc.delegate = d
+        topController()?.present(vc, animated: true)
+    }
+
+    /// 把文件存到用户选的位置（“存储到文件”，可选 iCloud 云盘）。
+    static func export(_ url: URL, done: @escaping (Bool) -> Void) {
+        let vc = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+        vc.directoryURL = iCloudDriveURL
+        let d = Delegate(onPick: { urls in done(!urls.isEmpty) }, onCancel: { done(false) })
+        keep = [d]
+        vc.delegate = d
+        topController()?.present(vc, animated: true)
+    }
+
+    final class Delegate: NSObject, UIDocumentPickerDelegate {
+        let onPick: ([URL]) -> Void
+        let onCancel: () -> Void
+        init(onPick: @escaping ([URL]) -> Void, onCancel: @escaping () -> Void = {}) {
+            self.onPick = onPick
+            self.onCancel = onCancel
+        }
 
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            if let u = urls.first { onPick(u) }
+            onPick(urls)
         }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onCancel()
+        }
+    }
+}
+
+extension CacheArchive {
+    /// 把本机缓存的邮件打成一个 .zip（里面每封是一个 .eml，可以用电脑上的邮件程序打开）。
+    static func makeZip(olderThanDays: Int) throws -> (zip: URL, files: [DiskCache.RawFile], bytes: Int) {
+        let fm = FileManager.default
+        let cutoff = Date().addingTimeInterval(-Double(olderThanDays) * 86400)
+        let picked = DiskCache.rawFiles().filter { f in
+            guard olderThanDays > 0 else { return true }
+            let d = (try? f.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return d <= cutoff
+        }
+        guard !picked.isEmpty else {
+            throw MailError.protocolError(tr("没有需要导出的邮件。", "There is nothing to export."))
+        }
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyy-MM-dd HHmm"
+        let name = folderName + " " + stamp.string(from: Date())
+        let work = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dir = work.appendingPathComponent(name, isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        var bytes = 0
+        for f in picked {
+            let sub = dir.appendingPathComponent(f.account, isDirectory: true)
+            if !fm.fileExists(atPath: sub.path) { try fm.createDirectory(at: sub, withIntermediateDirectories: true) }
+            try fm.copyItem(at: f.url, to: sub.appendingPathComponent(f.name + ".eml"))
+            bytes += (try? f.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        }
+        var zipURL: URL?
+        var err: NSError?
+        var copyError: Error?
+        NSFileCoordinator().coordinate(readingItemAt: dir, options: .forUploading, error: &err) { tmp in
+            let dest = work.appendingPathComponent(name + ".zip")
+            do {
+                try fm.copyItem(at: tmp, to: dest)
+                zipURL = dest
+            } catch {
+                copyError = error
+            }
+        }
+        try? fm.removeItem(at: dir)
+        if let e = copyError ?? err { throw e }
+        guard let z = zipURL else { throw MailError.protocolError(tr("压缩失败。", "Couldn't create the archive.")) }
+        return (z, picked, bytes)
+    }
+
+    static func removeLocal(_ files: [DiskCache.RawFile]) {
+        for f in files { try? FileManager.default.removeItem(at: f.url) }
     }
 }

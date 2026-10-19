@@ -173,6 +173,8 @@ struct MessageSummary: Codable, Identifiable, Hashable {
     var preview: String?
     var contentType: String?
     var transferEncoding: String?
+    /// 不在当前列表所属文件夹里的邮件（例如并入收件箱会话的“已发送”回复），记下它真正所在的文件夹
+    var folderPath: String?
 
     var id: Int { uid }
 
@@ -225,10 +227,15 @@ struct Conversation: Identifiable, Hashable {
     /// 新的在前
     var messages: [MessageSummary]
 
-    var id: String { "c" + String(messages.map(\.uid).min() ?? 0) }
+    var id: String { "c" + String((own.isEmpty ? messages : own).map(\.uid).min() ?? 0) }
     var latest: MessageSummary { messages[0] }
-    var uids: [Int] { messages.map(\.uid) }
-    var unread: Int { messages.filter { !$0.seen }.count }
+    /// 属于当前文件夹的邮件（不含并入的“已发送”回复）
+    var own: [MessageSummary] { messages.filter { $0.folderPath == nil } }
+    var ownLatest: MessageSummary { own.first ?? messages[0] }
+    /// 删除、移动、标记时只处理当前文件夹里的邮件
+    var uids: [Int] { own.map(\.uid) }
+    var unread: Int { own.filter { !$0.seen }.count }
+    var includesMyReplies: Bool { messages.contains { $0.folderPath != nil } }
     var flagged: Bool { messages.contains { $0.flagged } }
     var hasAttachment: Bool { messages.contains { $0.hasAttachment } }
     var answered: Bool { latest.answered }

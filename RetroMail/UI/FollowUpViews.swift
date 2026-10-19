@@ -650,16 +650,26 @@ struct FollowUpMessageView: View {
 
 private struct FollowUpConversationHost: View {
     let item: FollowUp
-    @StateObject private var list: MessageListModel
+    let account: MailAccount
 
-    init(item: FollowUp, account: MailAccount) {
-        self.item = item
+    var body: some View {
         let folder = MailCenter.shared.folders[account.id]?.first { $0.path == item.folder }
             ?? MailFolder(path: item.folder, delimiter: nil, flags: [])
+        MessageHostView(account: account, folder: folder, summary: item.summary)
+    }
+}
+
+/// 单独打开一封邮件（来自通知或跟进事项），复用会话页。
+struct MessageHostView: View {
+    let summary: MessageSummary
+    @StateObject private var list: MessageListModel
+
+    init(account: MailAccount, folder: MailFolder, summary: MessageSummary) {
+        self.summary = summary
         _list = StateObject(wrappedValue: MessageListModel(account: account, folder: folder))
     }
 
     var body: some View {
-        ConversationView(list: list, conversation: Conversation(messages: [item.summary]))
+        ConversationView(list: list, conversation: Conversation(messages: [summary]))
     }
 }

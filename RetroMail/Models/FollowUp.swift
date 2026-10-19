@@ -216,6 +216,7 @@ final class FollowUpStore: ObservableObject {
             c.body = body
             c.sound = .default
             c.threadIdentifier = "followups"
+            c.categoryIdentifier = "FOLLOWUP"
             c.userInfo = ["followUp": f.id]
             let comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: date)
             return UNNotificationRequest(identifier: id, content: c,

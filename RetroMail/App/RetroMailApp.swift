@@ -2,16 +2,49 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-/// 应用在前台时也显示提醒（跟进事项到时间了）。
+/// 通知：前台也显示横幅；处理通知上的按钮；点通知打开对应邮件。
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        MailPrefs.registerDefaults()
         UNUserNotificationCenter.current().delegate = self
+        MailNotifier.registerCategories()
         return true
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .list, .sound])
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let info = response.notification.request.content.userInfo
+        let action = response.actionIdentifier
+        Task {
+            if let fu = info["followUp"] as? String {
+                await MainActor.run {
+                    switch action {
+                    case "fu-done":
+                        FollowUpStore.shared.setDone(fu, true)
+                    case "fu-later":
+                        if var f = FollowUpStore.shared.item(fu) {
+                            f.reminder = Date().addingTimeInterval(3600)
+                            FollowUpStore.shared.save(f)
+                        }
+                    default:
+                        MailCenter.shared.openFollowUp = fu
+                    }
+                }
+            } else if ["read", "archive", "trash"].contains(action) {
+                await MailNotifier.handle(action: action, userInfo: info)
+            } else if let idStr = info["account"] as? String, let id = UUID(uuidString: idStr),
+                      let folder = info["folder"] as? String, let uid = info["uid"] as? Int {
+                await MainActor.run {
+                    MailCenter.shared.openRequest = OpenRequest(account: id, folder: folder, uid: uid)
+                }
+            }
+            completionHandler()
+        }
     }
 }
 
@@ -28,11 +61,22 @@ struct RetroMailApp: App {
                 .environmentObject(settings)
                 .preferredColorScheme(settings.colorScheme)
                 .tint(Color.ink)
-                .task { await CacheArchive.autoRunIfNeeded() }
+                .task {
+                    if !AccountStore.shared.accounts.isEmpty, BackgroundRefresh.enabled {
+                        _ = await MailNotifier.requestPermission()
+                    }
+                    await CacheArchive.autoRunIfNeeded()
+                }
         }
         .onChange(of: scenePhase) { phase in
-            if phase == .background {
+            switch phase {
+            case .active:
+                MailCenter.shared.startLive()
+            case .background:
+                MailCenter.shared.stopLive()
                 BackgroundRefresh.schedule()
+            default:
+                break
             }
         }
         .backgroundTask(.appRefresh(BackgroundRefresh.taskID)) {

@@ -470,27 +470,101 @@ final class IMAPConnection: @unchecked Sendable {
         try await run("UID STORE \(Self.uidSet(uids)) \(add ? "+" : "-")FLAGS.SILENT (\(flag))")
     }
 
-    func move(_ path: String, uids: [Int], to dest: String) async throws {
-        guard !uids.isEmpty else { return }
+    /// 移动邮件。返回“原 UID → 目标文件夹里的新 UID”（服务器支持 UIDPLUS 时才有）。
+    @discardableResult
+    func move(_ path: String, uids: [Int], to dest: String) async throws -> [Int: Int] {
+        guard !uids.isEmpty else { return [:] }
         try await select(path)
         let set = Self.uidSet(uids)
+        let r: Response
         if capabilities.contains("MOVE") {
-            try await run([.text("UID MOVE \(set) "), Self.astring(dest)])
+            r = try await run([.text("UID MOVE \(set) "), Self.astring(dest)])
         } else {
-            try await run([.text("UID COPY \(set) "), Self.astring(dest)])
+            r = try await run([.text("UID COPY \(set) "), Self.astring(dest)])
             try await expunge(set)
         }
+        let texts = r.untagged.map { String(decoding: $0, as: UTF8.self) } + [r.text]
+        for t in texts {
+            if let m = Self.parseCopyUID(t) { return m }
+        }
+        return [:]
     }
 
-    func delete(_ path: String, uids: [Int], trash: String?) async throws {
-        guard !uids.isEmpty else { return }
+    @discardableResult
+    func delete(_ path: String, uids: [Int], trash: String?) async throws -> [Int: Int] {
+        guard !uids.isEmpty else { return [:] }
         if let trash = trash, trash != path {
-            try await move(path, uids: uids, to: trash)
+            return try await move(path, uids: uids, to: trash)
         } else {
             try await select(path)
             try await expunge(Self.uidSet(uids))
+            return [:]
         }
     }
+
+    /// 解析 “[COPYUID 38505 304,319:320 3956:3958]”。
+    static func parseCopyUID(_ text: String) -> [Int: Int]? {
+        guard let r = text.range(of: "[COPYUID ", options: .caseInsensitive) else { return nil }
+        let rest = text[r.upperBound...].prefix { $0 != "]" }
+        let parts = rest.split(separator: " ")
+        guard parts.count >= 3 else { return nil }
+        func expand(_ s: Substring) -> [Int] {
+            var out: [Int] = []
+            for piece in s.split(separator: ",") {
+                let ab = piece.split(separator: ":")
+                if ab.count == 2, let a = Int(ab[0]), let b = Int(ab[1]) {
+                    out += a <= b ? Array(a...b) : Array((b...a).reversed())
+                } else if let a = Int(piece) {
+                    out.append(a)
+                }
+            }
+            return out
+        }
+        let src = expand(parts[1]), dst = expand(parts[2])
+        guard src.count == dst.count, !src.isEmpty else { return nil }
+        return Dictionary(zip(src, dst), uniquingKeysWith: { a, _ in a })
+    }
+
+    // MARK: - IDLE（新邮件实时到达）
+
+    /// 进入 IDLE，等服务器通知有变化（返回 true）或等到 maxWait 秒（抛出超时）。
+    /// 只能在专用连接上调用：等待期间这条连接不能做别的事。
+    func idleOnce(_ path: String, maxWait: TimeInterval) async throws -> Bool {
+        guard let socket = socket else { throw MailError.closed }
+        try await select(path, force: true)
+        let before = selectedExists
+        tagCounter += 1
+        let tag = String(format: "I%04d", tagCounter)
+        try await socket.write("\(tag) IDLE\r\n")
+        // 等待 “+ idling”
+        while true {
+            let r = try await readResponse()
+            if r.first == 43 { break }
+            let line = String(decoding: r, as: UTF8.self)
+            if line.hasPrefix(tag + " ") { throw MailError.server(line) }
+        }
+        socket.readTimeout = maxWait
+        defer { socket.readTimeout = 45 }
+        var changed = false
+        while !changed {
+            let r = try await readResponse()
+            let u = String(decoding: r, as: UTF8.self).uppercased()
+            if u.hasPrefix("*") && (u.contains(" EXISTS") || u.contains(" RECENT") || u.contains(" EXPUNGE") || u.contains(" FETCH")) {
+                changed = true
+            }
+        }
+        socket.readTimeout = 30
+        try await socket.write("DONE\r\n")
+        while true {
+            let r = try await readResponse()
+            if String(decoding: r, as: UTF8.self).hasPrefix(tag + " ") { break }
+        }
+        selected = nil
+        _ = before
+        return changed
+    }
+
+    var supportsIdle: Bool { capabilities.contains("IDLE") }
 
     private func expunge(_ set: String) async throws {
         try await run("UID STORE \(set) +FLAGS.SILENT (\\Deleted)")

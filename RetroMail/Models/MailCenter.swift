@@ -13,6 +13,14 @@ final class MailCenter: ObservableObject {
     @Published var loadingAccounts: Set<UUID> = []
     /// 上次检查邮件的时间（工具栏显示“已更新 …”）
     @Published var lastUpdated: Date?
+    /// 底部的操作提示（“已移到归档 · 撤销”）
+    @Published var toast: MailToast?
+    /// 点通知后要打开的邮件
+    @Published var openRequest: OpenRequest?
+    /// 点跟进提醒后要打开的事项
+    @Published var openFollowUp: String?
+    var liveTasks: [Task<Void, Never>] = []
+    var idleConnections: [UUID: IMAPConnection] = [:]
 
     /// 每个账户三条独立连接，互不排队：
     /// - interactive：打开邮件、标记、移动、删除（用户正在等的操作）
@@ -220,11 +228,14 @@ enum BackgroundRefresh {
     static func schedule() {
         guard enabled else { return }
         let req = BGAppRefreshTaskRequest(identifier: taskID)
-        req.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        req.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
         try? BGTaskScheduler.shared.submit(req)
     }
 
     private static func key(_ id: UUID) -> String { "nextUID.\(id.uuidString)" }
+
+    static func lastUID(_ id: UUID) -> Int { UserDefaults.standard.integer(forKey: key(id)) }
+    static func setLastUID(_ id: UUID, _ v: Int) { UserDefaults.standard.set(v, forKey: key(id)) }
 
     /// 前台已经看到的邮件不再通知。
     static func noteSeen(account: UUID, nextUID: Int) {
@@ -245,7 +256,13 @@ enum BackgroundRefresh {
                 let st = try await client.perform { try await $0.status("INBOX") }
                 if last > 0, st.uidNext > last {
                     let fresh = try await client.perform { try await $0.fetchSince("INBOX", uid: last) }
-                    await notify(a, fresh.filter { !$0.seen }, multiAccount: accounts.count > 1)
+                    let unseen = fresh.filter { !$0.seen }
+                    if !unseen.isEmpty {
+                        await MailNotifier.post(unseen, account: a, folder: "INBOX", client: client)
+                    }
+                }
+                if MailPrefs.badge {
+                    await MailNotifier.setBadge(st.unseen)
                 }
                 if st.uidNext > 0 { UserDefaults.standard.set(st.uidNext, forKey: key(a.id)) }
             } catch {
