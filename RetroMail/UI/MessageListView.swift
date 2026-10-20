@@ -113,35 +113,79 @@ final class MessageListModel: ObservableObject {
         await refresh()
     }
 
+    private var refreshing = false
+    private var lastSentLoad = Date.distantPast
+
+    private var validityKey: String { "uidvalidity.\(account.id.uuidString).\(folder.path)" }
+
+    /// 刷新：有缓存时做增量同步（只取新邮件 + 已知邮件的旗标），没有缓存或 UIDVALIDITY 变了才整页下载。
+    /// 同时有好几处要求刷新时只跑一次。
     func refresh() async {
+        guard !refreshing else { return }
+        refreshing = true
         loading = true
-        defer { loading = false }
+        defer {
+            loading = false
+            refreshing = false
+        }
         let path = folder.path
+        let known = messages.map(\.uid).filter { $0 > 0 }
+        let validity = UserDefaults.standard.integer(forKey: validityKey)
         do {
-            let (result, count) = try await syncClient.perform { c -> ((messages: [MessageSummary], hasMore: Bool), Int) in
-                let r = try await c.fetchLatest(path, limit: 60)
-                return (r, c.selectedExists)
+            if let maxUID = known.max(), validity > 0 {
+                let window = Array(known.sorted().suffix(400))
+                let r = try await syncClient.perform(timeout: 60) { try await $0.syncFolder(path, known: window, sinceUID: maxUID) }
+                if r.uidValidity != 0 && r.uidValidity != validity {
+                    try await fullRefresh(path)
+                } else {
+                    // 服务器没回旗标（个别服务器的怪癖）时不要把邮件当成已删除
+                    let windowSet = r.flags.isEmpty && r.exists > 0 ? Set<Int>() : Set(window)
+                    var list = messages.filter { m in
+                        m.uid < 0 || !windowSet.contains(m.uid) || r.flags[m.uid] != nil
+                    }
+                    for i in list.indices {
+                        if let f = r.flags[list[i].uid] { list[i].flags = f }
+                    }
+                    let have = Set(list.map(\.uid))
+                    list += r.newMessages.filter { !have.contains($0.uid) }
+                    messages = MailActions.shared.overlay(keepPreviews(list), account: account.id, folder: path)
+                        .sorted(by: MessageSummary.newestFirst)
+                    total = r.exists
+                }
+            } else {
+                try await fullRefresh(path)
             }
-            messages = keepPreviews(result.messages).sorted(by: MessageSummary.newestFirst)
             updatedAt = Date()
-            hasMore = result.hasMore
-            total = count
             loadPreviews()
-            if mergesSent { Task { await self.loadSentReplies() } }
-            DiskCache.saveList(Array(messages.prefix(120)), account: account.id, folder: path)
+            if mergesSent, Date().timeIntervalSince(lastSentLoad) > 300 {
+                lastSentLoad = Date()
+                Task { await self.loadSentReplies() }
+            }
+            DiskCache.saveList(Array(messages.filter { $0.uid > 0 }.prefix(150)), account: account.id, folder: path)
             if folder.role == .inbox, let top = messages.map(\.uid).max() {
                 BackgroundRefresh.noteSeen(account: account.id, nextUID: top + 1)
             }
             let unseen = messages.filter { !$0.seen }.count
             if !hasMore || unseen == 0 {
                 MailCenter.shared.unread[MailCenter.shared.unreadKey(account.id, path)] = unseen
-            } else {
-                let acc = account
-                Task { await MailCenter.shared.refreshUnread(acc, paths: [path]) }
             }
         } catch {
-            self.error = error.localizedDescription
+            // 自动刷新失败不打扰用户；手动刷新才提示
+            if updatedAt == nil { self.error = error.localizedDescription }
         }
+    }
+
+    private func fullRefresh(_ path: String) async throws {
+        let (result, count, validity) = try await syncClient.perform(timeout: 60) { c -> ((messages: [MessageSummary], hasMore: Bool), Int, Int) in
+            let r = try await c.fetchLatest(path, limit: 60)
+            return (r, c.selectedExists, c.selectedUIDValidity)
+        }
+        if validity > 0 { UserDefaults.standard.set(validity, forKey: validityKey) }
+        let temps = messages.filter { $0.uid < 0 }
+        messages = MailActions.shared.overlay(keepPreviews(result.messages) + temps, account: account.id, folder: path)
+            .sorted(by: MessageSummary.newestFirst)
+        hasMore = result.hasMore
+        total = count
     }
 
     func loadMore() async {
@@ -212,7 +256,7 @@ final class MessageListModel: ObservableObject {
                 for m in batch { previewRequested.remove(m.uid) }
                 continue
             }
-            let info = Dictionary(uniqueKeysWithValues: batch.map { ($0.uid, ($0.contentType, $0.transferEncoding)) })
+            let info = Dictionary(batch.map { ($0.uid, ($0.contentType, $0.transferEncoding)) }, uniquingKeysWith: { a, _ in a })
             let texts = await Task.detached { () -> [Int: String] in
                 var out: [Int: String] = [:]
                 for (uid, data) in raw {
@@ -296,14 +340,13 @@ final class MessageListModel: ObservableObject {
         guard changed > 0 || !on else { return }
         update(uids) { $0.set("\\Seen", on) }
         MailCenter.shared.adjustUnread(account, folder.path, by: on ? -changed : changed)
-        let path = folder.path
-        await sync { try await $0.store(path, uids: uids, flag: "\\Seen", add: on) }
+        MailActions.shared.enqueue(PendingAction(account: account.id, folder: folder.path, uids: uids, kind: .flag, flag: "\\Seen", on: on))
+        MailCenter.shared.updateBadge()
     }
 
     func setFlagged(_ uids: [Int], _ on: Bool) async {
         update(uids) { $0.set("\\Flagged", on) }
-        let path = folder.path
-        await sync { try await $0.store(path, uids: uids, flag: "\\Flagged", add: on) }
+        MailActions.shared.enqueue(PendingAction(account: account.id, folder: folder.path, uids: uids, kind: .flag, flag: "\\Flagged", on: on))
     }
 
     func delete(_ uids: [Int]) async {
@@ -311,37 +354,52 @@ final class MessageListModel: ObservableObject {
         let unseenRemoved = removed.filter { !$0.seen }.count
         remove(uids)
         MailCenter.shared.adjustUnread(account, folder.path, by: -unseenRemoved)
-        let trashFolder = MailCenter.shared.folder(account, role: .trash)
-        let trash = trashFolder?.path
-        let path = folder.path
-        do {
-            let map = try await client.perform { try await $0.delete(path, uids: uids, trash: trash) }
-            if let t = trashFolder, t.path != path {
-                MailCenter.shared.didMove(account, from: path, to: t, messages: removed, uidMap: map, announce: true, deleted: true)
-            }
-        } catch {
-            self.error = error.localizedDescription
-            await refresh()
-        }
+        let trash = MailCenter.shared.folder(account, role: .trash)?.path
+        let toTrash = trash != nil && trash != folder.path
+        let id = MailActions.shared.enqueue(PendingAction(account: account.id, folder: folder.path, uids: uids, kind: .delete,
+                                                          dest: toTrash ? trash : nil, messages: removed))
+        if toTrash, let t = trash { insertTemps(removed, into: t) }
+        let n = removed.count
+        MailCenter.shared.showToast(MailToast(text: tr("已删除 \(n) 封邮件", "Deleted \(n) message\(n == 1 ? "" : "s")"),
+                                              undo: toTrash ? { _ = MailActions.shared.undo(id) } : nil))
+        DiskCache.saveList(Array(messages.filter { $0.uid > 0 }.prefix(150)), account: account.id, folder: folder.path)
+        MailCenter.shared.updateBadge()
     }
 
+    /// 移动：本机立即生效（这里消失、目标文件夹里立刻出现），服务器在后台同步。
     func move(_ uids: [Int], to dest: MailFolder, announce: Bool = true) async {
         let moved = visible.filter { uids.contains($0.uid) }
         let unseen = moved.filter { !$0.seen }.count
         remove(uids)
         MailCenter.shared.adjustUnread(account, folder.path, by: -unseen)
         MailCenter.shared.adjustUnread(account, dest.path, by: unseen)
-        let path = folder.path
-        do {
-            let map = try await client.perform { try await $0.move(path, uids: uids, to: dest.path) }
-            MailCenter.shared.didMove(account, from: path, to: dest, messages: moved, uidMap: map, announce: announce)
-        } catch {
-            self.error = error.localizedDescription
-            await refresh()
+        let id = MailActions.shared.enqueue(PendingAction(account: account.id, folder: folder.path, uids: uids, kind: .move,
+                                                          dest: dest.path, messages: moved))
+        insertTemps(moved, into: dest.path)
+        DiskCache.saveList(Array(messages.filter { $0.uid > 0 }.prefix(150)), account: account.id, folder: folder.path)
+        if announce {
+            MailCenter.shared.showToast(MailToast(text: tr("已移到“\(dest.displayName)”", "Moved to \(dest.displayName)"),
+                                                  undo: { _ = MailActions.shared.undo(id) }))
         }
-        let acc = account
-        let paths = [path, dest.path]
-        Task { await MailCenter.shared.refreshUnread(acc, paths: paths) }
+        MailCenter.shared.updateBadge()
+    }
+
+    /// 在目标文件夹里先放上临时条目（UID 记为负数），同步完成后换成真正的。
+    private func insertTemps(_ list: [MessageSummary], into path: String) {
+        guard let target = MessageListModel.liveModel(account: account.id, folder: path) else { return }
+        let temps = list.map { m -> MessageSummary in
+            var x = m
+            x.uid = -m.uid
+            x.folderPath = nil
+            return x
+        }
+        target.insertMoved(temps)
+    }
+
+    func removeLocally(_ uids: Set<Int>) {
+        guard !uids.isEmpty else { return }
+        messages.removeAll { uids.contains($0.uid) }
+        searchResults?.removeAll { uids.contains($0.uid) }
     }
 
     /// 归档：移到“归档”文件夹（没有时提示）。
@@ -352,15 +410,6 @@ final class MessageListModel: ObservableObject {
             return
         }
         await move(uids, to: dest)
-    }
-
-    private func sync(_ op: (IMAPConnection) async throws -> Void) async {
-        do {
-            try await client.perform(op)
-        } catch {
-            self.error = error.localizedDescription
-            await refresh()
-        }
     }
 }
 

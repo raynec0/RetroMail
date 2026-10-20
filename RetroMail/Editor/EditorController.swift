@@ -112,6 +112,118 @@ final class EditorController: NSObject, ObservableObject, WKScriptMessageHandler
         }
     }
 
+    // MARK: 操作反馈
+
+    struct Toast: Equatable {
+        let id = UUID()
+        let text: String
+        let ok: Bool
+    }
+
+    @Published var toast: Toast?
+
+    /// 工具栏按钮用：执行命令，并根据结果给出震动和一句提示（生效了 / 为什么没生效）。
+    func act(_ fn: String, _ args: Any?...) {
+        let argList = args.map(Self.js).joined(separator: ",")
+        let first = args.first.flatMap { $0 }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        guard let wv = webView, ready else {
+            show(tr("编辑器还在加载，请稍等一下再点。", "The editor is still loading. Try again in a moment."), ok: false)
+            return
+        }
+        wv.evaluateJavaScript("RE.run(\(Self.js(fn)), [\(argList)])") { [weak self] result, error in
+            Task { @MainActor in
+                self?.report(fn, first, result as? [String: Any], error)
+            }
+        }
+    }
+
+    private func report(_ fn: String, _ arg: Any?, _ r: [String: Any]?, _ error: Error?) {
+        let label = Self.label(fn, arg as? String)
+        guard let r = r, (r["ok"] as? Bool) ?? ((r["ok"] as? NSNumber)?.boolValue ?? false) else {
+            let why = (r?["error"] as? String) ?? error?.localizedDescription ?? ""
+            show(tr("\(label)没有完成", "\(label) didn't work") + (why.isEmpty ? "" : "：" + why), ok: false)
+            return
+        }
+        func b(_ k: String) -> Bool { (r[k] as? Bool) ?? ((r[k] as? NSNumber)?.boolValue ?? false) }
+        let changed = b("changed"), fmt = b("formatChanged"), hadSel = b("hadSel"), hadFocus = b("hadFocus")
+        let ret = r["ret"] as? String
+        switch ret {
+        case "notable"?:
+            show(tr("请先把光标放在表格里，再点“\(label)”。", "Put the cursor in a table first, then tap \(label)."), ok: false); return
+        case "nonext"?:
+            show(tr("右边没有可以合并的单元格。", "There's no cell to the right to merge."), ok: false); return
+        case "nosel"?:
+            show(tr("请先选中要修改的文字。", "Select some text first."), ok: false); return
+        case "nopainter"?:
+            show(tr("请先点“格式刷”复制格式。", "Tap Format Painter first to copy a format."), ok: false); return
+        default:
+            break
+        }
+        if fn == "copyFormat" {
+            show(tr("已复制格式：选中目标文字后点“应用格式”。", "Format copied: select text, then tap Apply."), ok: true); return
+        }
+        if fn == "cancelPainter" { return }
+        if fn == "cmd", let a = arg as? String, a == "undo" || a == "redo", !changed {
+            show(a == "undo" ? tr("没有可以撤销的操作。", "Nothing to undo.") : tr("没有可以重做的操作。", "Nothing to redo."), ok: false); return
+        }
+        if fn == "unlink", !changed {
+            show(tr("光标不在链接上。", "The cursor isn't on a link."), ok: false); return
+        }
+        if changed {
+            show("✓ " + label, ok: true)
+        } else if fmt {
+            show("✓ " + label + tr("（接下来输入的文字会使用这个格式）", " (applies to what you type next)"), ok: true)
+        } else if !hadFocus {
+            show(tr("请先点一下正文，把光标放到要修改的位置。", "Tap in the message first to place the cursor."), ok: false)
+        } else if !hadSel {
+            show(tr("“\(label)”没有变化：请先选中要修改的文字。", "\(label) changed nothing — select some text first."), ok: false)
+        } else {
+            show(tr("“\(label)”已经是这个效果了。", "\(label) is already applied."), ok: true)
+        }
+    }
+
+    func show(_ text: String, ok: Bool) {
+        if !ok { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+        let t = Toast(text: text, ok: ok)
+        toast = t
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: ok ? 1_400_000_000 : 2_600_000_000)
+            if self?.toast?.id == t.id { self?.toast = nil }
+        }
+    }
+
+    private static func label(_ fn: String, _ arg: String?) -> String {
+        let cmds: [String: (String, String)] = [
+            "undo": ("撤销", "Undo"), "redo": ("重做", "Redo"), "bold": ("加粗", "Bold"), "italic": ("倾斜", "Italic"),
+            "underline": ("下划线", "Underline"), "strikeThrough": ("删除线", "Strikethrough"),
+            "superscript": ("上标", "Superscript"), "subscript": ("下标", "Subscript"),
+            "insertUnorderedList": ("项目符号", "Bullets"), "insertOrderedList": ("编号", "Numbering"),
+            "outdent": ("减少缩进", "Outdent"), "indent": ("增加缩进", "Indent"),
+            "justifyLeft": ("左对齐", "Align Left"), "justifyCenter": ("居中", "Center"),
+            "justifyRight": ("右对齐", "Align Right"), "justifyFull": ("两端对齐", "Justify"),
+            "insertHorizontalRule": ("分隔线", "Line"), "insertText": ("插入文字", "Insert Text"),
+            "foreColor": ("字体颜色", "Font Color"), "hiliteColor": ("突出显示", "Highlight"),
+            "fontName": ("字体", "Font"), "insertHTML": ("插入", "Insert"), "formatBlock": ("样式", "Style"),
+        ]
+        let fns: [String: (String, String)] = [
+            "fontSize": ("字号", "Font Size"), "growFont": ("字号", "Font Size"), "color": ("字体颜色", "Font Color"),
+            "highlight": ("突出显示", "Highlight"), "clear": ("清除格式", "Clear Formatting"), "block": ("样式", "Style"),
+            "bullet": ("项目符号", "Bullets"), "number": ("编号", "Numbering"), "lineHeight": ("行距", "Line Spacing"),
+            "spaceAfter": ("段后间距", "Spacing After"), "link": ("链接", "Link"), "unlink": ("取消链接", "Unlink"),
+            "image": ("插入图片", "Insert Picture"), "table": ("插入表格", "Insert Table"),
+            "addRow": ("插入行", "Insert Row"), "addCol": ("插入列", "Insert Column"), "delRow": ("删除行", "Delete Row"),
+            "delCol": ("删除列", "Delete Column"), "delTable": ("删除表格", "Delete Table"), "merge": ("合并单元格", "Merge Cells"),
+            "cellFill": ("单元格底纹", "Cell Shading"), "border": ("表格边框", "Table Border"), "tableWidth": ("表格宽度", "Table Width"),
+            "changeCase": ("更改大小写", "Change Case"), "pasteFormat": ("应用格式", "Apply Format"), "copyFormat": ("格式刷", "Format Painter"),
+            "replaceSelection": ("替换选中文字", "Replace Selection"), "replaceBody": ("替换正文", "Replace Body"),
+            "insertHTML": ("插入", "Insert"),
+        ]
+        if fn == "cmd", let a = arg, let l = cmds[a] { return tr(l.0, l.1) }
+        if let l = fns[fn] { return tr(l.0, l.1) }
+        return tr("操作", "Action")
+    }
+
     func callResult(_ fn: String, _ args: Any?...) async -> Any? {
         await eval("RE.\(fn)(\(args.map(Self.js).joined(separator: ",")))")
     }

@@ -73,7 +73,7 @@ struct RetroMailApp: App {
             case .active:
                 MailCenter.shared.startLive()
             case .background:
-                MailCenter.shared.stopLive()
+                MailCenter.shared.enterBackground()
                 BackgroundRefresh.schedule()
             default:
                 break

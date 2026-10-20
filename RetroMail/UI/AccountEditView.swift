@@ -293,6 +293,7 @@ struct SettingsView: View {
     @AppStorage(MailPrefs.previewKey) private var notifyPreview = true
     @AppStorage(MailPrefs.idleKey) private var useIdle = true
     @AppStorage(MailPrefs.badgeKey) private var badge = true
+    @AppStorage(MailPrefs.keepAliveKey) private var keepAlive = true
     @State private var message: String?
     @State private var cacheSize = "…"
     @State private var showAI = false
@@ -357,6 +358,7 @@ struct SettingsView: View {
 
                     RetroGroup(tr("收取新邮件", "Fetching New Mail")) {
                         RetroCheckbox(label: tr("实时收信（IDLE 推送：服务器一收到新邮件就显示）", "Real-time (IDLE push: new mail shows up as soon as it arrives)"), isOn: $useIdle)
+                        RetroCheckbox(label: tr("切到后台也保持在线（新邮件秒到并推送；会多耗一些电）", "Stay connected in the background (instant alerts; uses more battery)"), isOn: $keepAlive)
                         RetroRadio(label: tr("定时检查", "Check every"),
                                    options: [(1, tr("1 分", "1 min")), (2, tr("2 分", "2 min")), (5, tr("5 分", "5 min")), (15, tr("15 分", "15 min")), (0, tr("手动", "Manual"))],
                                    selection: $autoRefresh)
@@ -366,8 +368,8 @@ struct SettingsView: View {
                         RetroCheckbox(label: tr("有新邮件时推送通知", "Notify me about new mail"), isOn: $notify)
                         RetroCheckbox(label: tr("通知里显示邮件开头几行", "Show a preview in notifications"), isOn: $notifyPreview)
                         RetroCheckbox(label: tr("应用图标上显示未读数", "Show unread count on the app icon"), isOn: $badge)
-                        Text(tr("应用打开时（以及刚切到后台的一小会儿）是实时的。完全在后台时由 iOS 安排检查（通常 15 分钟到 1 小时一次，取决于你使用应用的频率）；请在 iOS 设置 → 通用 → 后台 App 刷新 里保持 RetroMail 打开。自签应用没法使用苹果的推送服务器，所以无法像官方邮件那样秒到。通知上可以直接“标为已读 / 归档 / 删除”，点通知会打开那封邮件。",
-                                "Real-time while the app is open. In the background iOS schedules checks (usually every 15–60 min depending on how often you use the app) — keep Background App Refresh on for RetroMail. Self-signed apps can't use Apple's push servers, so background delivery isn't instant. Notifications have Mark Read / Archive / Delete buttons, and tapping one opens the message."))
+                        Text(tr("开着“切到后台也保持在线”时，RetroMail 在后台继续和邮件服务器保持 IDLE 连接，新邮件几秒内就会推送（实现方式是在后台播放无声音频，不影响听音乐；从多任务界面上划关掉应用后就停止）。关掉这个选项时，后台由 iOS 安排检查（15 分钟到 1 小时一次）。通知上可以直接“标为已读 / 归档 / 删除”，点通知会打开那封邮件。",
+                                "With “Stay connected in the background” on, RetroMail keeps its IDLE connection open in the background so new mail is pushed within seconds (it plays silent audio in the background, which doesn't affect your music; swiping the app away stops it). With it off, iOS schedules background checks every 15–60 min. Notifications have Mark Read / Archive / Delete buttons, and tapping one opens the message."))
                             .font(RT.font(11))
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -389,8 +391,8 @@ struct SettingsView: View {
                     }
 
                     RetroGroup(tr("关于", "About")) {
-                        Text(tr("RetroMail 3.5\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
-                                "RetroMail 3.5\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
+                        Text(tr("RetroMail 3.6\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
+                                "RetroMail 3.6\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
                             .font(RT.font(12))
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -406,6 +408,7 @@ struct SettingsView: View {
                 .preferredColorScheme(settings.colorScheme)
         }
         .onChange(of: useIdle) { _ in MailCenter.shared.startLive() }
+        .onChange(of: keepAlive) { on in if !on { BackgroundKeeper.shared.stop() } }
         .onChange(of: autoRefresh) { _ in MailCenter.shared.startLive() }
         .onChange(of: badge) { on in if !on { MailNotifier.setBadge(0) } else { MailCenter.shared.updateBadge() } }
         .onChange(of: notify) { on in

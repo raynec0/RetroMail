@@ -63,13 +63,38 @@ struct FormatRibbon: View {
                 .background(LinearGradient(stops: IOS3.searchStops, startPoint: .top, endPoint: .bottom))
         }
         .foregroundColor(.ink)
+        .overlay(alignment: .top) {
+            if let t = ed.toast {
+                HStack(spacing: 6) {
+                    Text(t.ok ? "✓" : "!")
+                        .font(.system(size: 13, weight: .heavy))
+                        .foregroundColor(t.ok ? HexColor.color("#9BE58B") : HexColor.color("#FFD36B"))
+                    Text(t.text.hasPrefix("✓ ") ? String(t.text.dropFirst(2)) : t.text)
+                        .font(RT.font(13, .bold))
+                        .foregroundColor(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Capsule().fill(Color.black.opacity(0.8)))
+                .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 1))
+                .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
+                .padding(.horizontal, 16)
+                .offset(y: -44)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                .allowsHitTesting(false)
+                .id(t.id)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: ed.toast)
     }
 
     private var caseActions: [SheetAction] {
         [
-            SheetAction(tr("全部大写 ABC", "UPPERCASE")) { ed.call("changeCase", "upper") },
-            SheetAction(tr("全部小写 abc", "lowercase")) { ed.call("changeCase", "lower") },
-            SheetAction(tr("首字母大写 Abc", "Capitalize Each Word")) { ed.call("changeCase", "title") },
+            SheetAction(tr("全部大写 ABC", "UPPERCASE")) { ed.act("changeCase", "upper") },
+            SheetAction(tr("全部小写 abc", "lowercase")) { ed.act("changeCase", "lower") },
+            SheetAction(tr("首字母大写 Abc", "Capitalize Each Word")) { ed.act("changeCase", "title") },
         ]
     }
 
@@ -113,29 +138,29 @@ struct FormatRibbon: View {
     @ViewBuilder
     private var homeTiles: some View {
         Group {
-        tile("arrow.uturn.backward", tr("撤销", "Undo")) { ed.call("cmd", "undo") }
-        tile("arrow.uturn.forward", tr("重做", "Redo")) { ed.call("cmd", "redo") }
+        tile("arrow.uturn.backward", tr("撤销", "Undo")) { ed.act("cmd", "undo") }
+        tile("arrow.uturn.forward", tr("重做", "Redo")) { ed.act("cmd", "redo") }
         separator
-        glyph("B", .system(size: 19, weight: .heavy, design: .serif), tr("加粗", "Bold"), active: ed.state.bold) { ed.call("cmd", "bold") }
-        glyph("I", .system(size: 19, weight: .regular, design: .serif).italic(), tr("倾斜", "Italic"), active: ed.state.italic) { ed.call("cmd", "italic") }
-        tile("underline", tr("下划线", "Underline"), active: ed.state.underline) { ed.call("cmd", "underline") }
-        tile("strikethrough", tr("删除线", "Strike"), active: ed.state.strike) { ed.call("cmd", "strikeThrough") }
-        tile("textformat.superscript", tr("上标", "Super"), active: ed.state.sup) { ed.call("cmd", "superscript") }
-        tile("textformat.subscript", tr("下标", "Sub"), active: ed.state.sub) { ed.call("cmd", "subscript") }
+        glyph("B", .system(size: 19, weight: .heavy, design: .serif), tr("加粗", "Bold"), active: ed.state.bold) { ed.act("cmd", "bold") }
+        glyph("I", .system(size: 19, weight: .regular, design: .serif).italic(), tr("倾斜", "Italic"), active: ed.state.italic) { ed.act("cmd", "italic") }
+        tile("underline", tr("下划线", "Underline"), active: ed.state.underline) { ed.act("cmd", "underline") }
+        tile("strikethrough", tr("删除线", "Strike"), active: ed.state.strike) { ed.act("cmd", "strikeThrough") }
+        tile("textformat.superscript", tr("上标", "Super"), active: ed.state.sup) { ed.act("cmd", "superscript") }
+        tile("textformat.subscript", tr("下标", "Sub"), active: ed.state.sub) { ed.act("cmd", "subscript") }
         }
         separator
         Group {
         glyph("Aa", .system(size: 15, weight: .bold, design: .serif), ed.state.fontName.isEmpty ? tr("字体", "Font") : ed.state.fontName) { sheet = .font }
         glyph(ed.state.sizePt.isEmpty ? "11" : ed.state.sizePt, RT.font(15, .bold), tr("字号", "Size")) { sheet = .size }
-        glyph("A+", .system(size: 16, weight: .bold, design: .serif), tr("增大", "Grow")) { ed.call("growFont", 1.0) }
-        glyph("A−", .system(size: 16, weight: .bold, design: .serif), tr("缩小", "Shrink")) { ed.call("growFont", -1.0) }
+        glyph("A+", .system(size: 16, weight: .bold, design: .serif), tr("增大", "Grow")) { ed.act("growFont", 1.0) }
+        glyph("A−", .system(size: 16, weight: .bold, design: .serif), tr("缩小", "Shrink")) { ed.act("growFont", -1.0) }
         separator
         tile("paintpalette", tr("字体颜色", "Color")) { sheet = .color }
         tile("highlighter", tr("突出显示", "Highlight")) { sheet = .highlight }
         tile("paintbrush.pointed", ed.state.painter ? tr("应用格式", "Apply") : tr("格式刷", "Painter"), active: ed.state.painter) {
-            if ed.state.painter { ed.call("pasteFormat") } else { ed.call("copyFormat") }
+            if ed.state.painter { ed.act("pasteFormat") } else { ed.act("copyFormat") }
         }
-        tile("eraser", tr("清除格式", "Clear")) { ed.call("clear") }
+        tile("eraser", tr("清除格式", "Clear")) { ed.act("clear") }
         }
     }
 
@@ -144,24 +169,24 @@ struct FormatRibbon: View {
     @ViewBuilder
     private var paragraphTiles: some View {
         Group {
-        tile("list.bullet", tr("项目符号", "Bullets"), active: ed.state.ul) { ed.call("cmd", "insertUnorderedList") }
+        tile("list.bullet", tr("项目符号", "Bullets"), active: ed.state.ul) { ed.act("cmd", "insertUnorderedList") }
         tile("circle.grid.2x1", tr("符号样式", "Bullet Style")) { sheet = .bullets }
-        tile("list.number", tr("编号", "Numbering"), active: ed.state.ol) { ed.call("cmd", "insertOrderedList") }
+        tile("list.number", tr("编号", "Numbering"), active: ed.state.ol) { ed.act("cmd", "insertOrderedList") }
         tile("textformat.123", tr("编号样式", "Num Style")) { sheet = .numbering }
         separator
-        tile("decrease.indent", tr("减少缩进", "Outdent")) { ed.call("cmd", "outdent") }
-        tile("increase.indent", tr("增加缩进", "Indent")) { ed.call("cmd", "indent") }
+        tile("decrease.indent", tr("减少缩进", "Outdent")) { ed.act("cmd", "outdent") }
+        tile("increase.indent", tr("增加缩进", "Indent")) { ed.act("cmd", "indent") }
         }
         separator
         Group {
-        tile("text.alignleft", tr("左对齐", "Left"), active: ed.state.align == "left") { ed.call("cmd", "justifyLeft") }
-        tile("text.aligncenter", tr("居中", "Center"), active: ed.state.align == "center") { ed.call("cmd", "justifyCenter") }
-        tile("text.alignright", tr("右对齐", "Right"), active: ed.state.align == "right") { ed.call("cmd", "justifyRight") }
-        tile("text.justify", tr("两端对齐", "Justify"), active: ed.state.align == "justify") { ed.call("cmd", "justifyFull") }
+        tile("text.alignleft", tr("左对齐", "Left"), active: ed.state.align == "left") { ed.act("cmd", "justifyLeft") }
+        tile("text.aligncenter", tr("居中", "Center"), active: ed.state.align == "center") { ed.act("cmd", "justifyCenter") }
+        tile("text.alignright", tr("右对齐", "Right"), active: ed.state.align == "right") { ed.act("cmd", "justifyRight") }
+        tile("text.justify", tr("两端对齐", "Justify"), active: ed.state.align == "justify") { ed.act("cmd", "justifyFull") }
         separator
         tile("arrow.up.and.down.text.horizontal", tr("行距", "Spacing")) { sheet = .spacing }
         tile("textformat.alt", tr("样式", "Styles")) { sheet = .styles }
-        tile("text.quote", tr("引用块", "Quote"), active: ed.state.block == "blockquote") { ed.call("block", "blockquote") }
+        tile("text.quote", tr("引用块", "Quote"), active: ed.state.block == "blockquote") { ed.act("block", "blockquote") }
         }
     }
 
@@ -171,7 +196,7 @@ struct FormatRibbon: View {
     private var insertTiles: some View {
         Group {
         tile("link", tr("链接", "Link"), active: !ed.state.link.isEmpty) { sheet = .link }
-        tile("link.badge.plus", tr("取消链接", "Unlink")) { ed.call("unlink") }
+        tile("link.badge.plus", tr("取消链接", "Unlink")) { ed.act("unlink") }
         separator
         tile("photo", tr("插入图片", "Picture")) { onInlineImage() }
         tile("paperclip", tr("附件", "Attach")) { onActionSheet(tr("添加附件", "Attach"), attachActions) }
@@ -179,9 +204,9 @@ struct FormatRibbon: View {
         }
         separator
         Group {
-        tile("checklist", tr("待办清单", "Checklist")) { ed.call("bullet", "\"☐  \"") }
-        tile("minus", tr("分隔线", "Line")) { ed.call("cmd", "insertHorizontalRule") }
-        tile("calendar", tr("日期时间", "Date")) { ed.call("cmd", "insertText", Fmt.long(Date())) }
+        tile("checklist", tr("待办清单", "Checklist")) { ed.act("bullet", "\"☐  \"") }
+        tile("minus", tr("分隔线", "Line")) { ed.act("cmd", "insertHorizontalRule") }
+        tile("calendar", tr("日期时间", "Date")) { ed.act("cmd", "insertText", Fmt.long(Date())) }
         tile("signature", tr("签名", "Signature")) { onSignature() }
         tile("character", tr("符号", "Symbol")) { sheet = .symbols }
         }
@@ -194,25 +219,23 @@ struct FormatRibbon: View {
         tile("tablecells.badge.ellipsis", tr("插入表格", "Insert")) { sheet = .table }
         separator
         Group {
-            tile("arrow.up.square", tr("上方插行", "Row Above")) { ed.call("addRow", false) }
-            tile("arrow.down.square", tr("下方插行", "Row Below")) { ed.call("addRow", true) }
-            tile("arrow.left.square", tr("左侧插列", "Col Left")) { ed.call("addCol", false) }
-            tile("arrow.right.square", tr("右侧插列", "Col Right")) { ed.call("addCol", true) }
-            tile("minus.square", tr("删除行", "Del Row")) { ed.call("delRow") }
-            tile("minus.square.fill", tr("删除列", "Del Col")) { ed.call("delCol") }
-            tile("arrow.triangle.merge", tr("向右合并", "Merge")) { ed.call("merge") }
+            tile("arrow.up.square", tr("上方插行", "Row Above")) { ed.act("addRow", false) }
+            tile("arrow.down.square", tr("下方插行", "Row Below")) { ed.act("addRow", true) }
+            tile("arrow.left.square", tr("左侧插列", "Col Left")) { ed.act("addCol", false) }
+            tile("arrow.right.square", tr("右侧插列", "Col Right")) { ed.act("addCol", true) }
+            tile("minus.square", tr("删除行", "Del Row")) { ed.act("delRow") }
+            tile("minus.square.fill", tr("删除列", "Del Col")) { ed.act("delCol") }
+            tile("arrow.triangle.merge", tr("向右合并", "Merge")) { ed.act("merge") }
             tile("drop.fill", tr("底纹", "Shading")) { sheet = .cellFill }
-            tile("square.dashed", tr("无边框", "No Border")) { ed.call("border", "1px dashed #d0d0d0") }
-            tile("square", tr("细边框", "Thin")) { ed.call("border", "1px solid #8c8c8c") }
+            tile("square.dashed", tr("无边框", "No Border")) { ed.act("border", "1px dashed #d0d0d0") }
+            tile("square", tr("细边框", "Thin")) { ed.act("border", "1px solid #8c8c8c") }
         }
-        .disabled(!ed.state.inTable)
         Group {
-            tile("square.fill", tr("粗边框", "Thick")) { ed.call("border", "2px solid #000000") }
-            tile("arrow.left.and.right", tr("占满宽度", "Full Width")) { ed.call("tableWidth", true) }
-            tile("arrow.right.and.line.vertical.and.arrow.left", tr("自动宽度", "Auto Width")) { ed.call("tableWidth", false) }
-            tile("trash", tr("删除表格", "Delete")) { ed.call("delTable") }
+            tile("square.fill", tr("粗边框", "Thick")) { ed.act("border", "2px solid #000000") }
+            tile("arrow.left.and.right", tr("占满宽度", "Full Width")) { ed.act("tableWidth", true) }
+            tile("arrow.right.and.line.vertical.and.arrow.left", tr("自动宽度", "Auto Width")) { ed.act("tableWidth", false) }
+            tile("trash", tr("删除表格", "Delete")) { ed.act("delTable") }
         }
-        .disabled(!ed.state.inTable)
     }
 
     // MARK: 工具
@@ -281,9 +304,9 @@ struct EditorSheetView: View {
         switch sheet {
         case .font: FontSheet(ed: ed)
         case .size: SizeSheet(ed: ed)
-        case .color: ColorSheet(title: tr("字体颜色", "Font Color"), autoLabel: tr("自动（黑色）", "Automatic (Black)"), autoValue: "#000000") { ed.call("color", $0) }
-        case .highlight: ColorSheet(title: tr("突出显示颜色", "Highlight Color"), autoLabel: tr("无颜色", "No Color"), autoValue: "", highlight: true) { ed.call("highlight", $0) }
-        case .cellFill: ColorSheet(title: tr("单元格底纹", "Cell Shading"), autoLabel: tr("无颜色", "No Color"), autoValue: "") { ed.call("cellFill", $0) }
+        case .color: ColorSheet(title: tr("字体颜色", "Font Color"), autoLabel: tr("自动（黑色）", "Automatic (Black)"), autoValue: "#000000") { ed.act("color", $0) }
+        case .highlight: ColorSheet(title: tr("突出显示颜色", "Highlight Color"), autoLabel: tr("无颜色", "No Color"), autoValue: "", highlight: true) { ed.act("highlight", $0) }
+        case .cellFill: ColorSheet(title: tr("单元格底纹", "Cell Shading"), autoLabel: tr("无颜色", "No Color"), autoValue: "") { ed.act("cellFill", $0) }
         case .bullets: BulletSheet(ed: ed)
         case .numbering: NumberingSheet(ed: ed)
         case .spacing: SpacingSheet(ed: ed)
@@ -334,7 +357,7 @@ struct FontSheet: View {
                 VStack(spacing: 0) {
                     ForEach(FontOption.all) { f in
                         OptionRow(selected: FontOption.matches(ed.state.fontName, f)) {
-                            ed.call("cmd", "fontName", f.css)
+                            ed.act("cmd", "fontName", f.css)
                             dismiss()
                         } content: {
                             Text(f.name).font(.custom(f.preview, size: 17))
@@ -359,7 +382,7 @@ struct SizeSheet: View {
                     ForEach(sizes, id: \.self) { s in
                         let label = s == s.rounded() ? String(Int(s)) : String(s)
                         Button {
-                            ed.call("fontSize", s)
+                            ed.act("fontSize", s)
                             dismiss()
                         } label: {
                             Text(label)
@@ -479,7 +502,7 @@ struct BulletSheet: View {
                     ForEach(options.indices, id: \.self) { i in
                         let opt = options[i]
                         Button {
-                            ed.call("bullet", opt.0)
+                            ed.act("bullet", opt.0)
                             dismiss()
                         } label: {
                             VStack(alignment: .leading, spacing: 6) {
@@ -524,7 +547,7 @@ struct NumberingSheet: View {
                     ForEach(options.indices, id: \.self) { i in
                         let opt = options[i]
                         Button {
-                            ed.call("number", opt.0)
+                            ed.act("number", opt.0)
                             dismiss()
                         } label: {
                             VStack(alignment: .leading, spacing: 6) {
@@ -562,7 +585,7 @@ struct SpacingSheet: View {
                     FlowRow(spacing: 10) {
                         ForEach(lines, id: \.self) { v in
                             Button(v) {
-                                ed.call("lineHeight", v)
+                                ed.act("lineHeight", v)
                                 dismiss()
                             }
                             .buttonStyle(RetroButtonStyle(compact: true))
@@ -573,7 +596,7 @@ struct SpacingSheet: View {
                         ForEach(after.indices, id: \.self) { i in
                             let v = after[i]
                             Button(v.1) {
-                                ed.call("spaceAfter", v.0)
+                                ed.act("spaceAfter", v.0)
                                 dismiss()
                             }
                             .buttonStyle(RetroButtonStyle(compact: true))
@@ -610,7 +633,7 @@ struct StylesSheet: View {
                     ForEach(options.indices, id: \.self) { i in
                         let opt = options[i]
                         OptionRow(selected: ed.state.block == opt.0) {
-                            ed.call("block", opt.0)
+                            ed.act("block", opt.0)
                             dismiss()
                         } content: {
                             Text(opt.1).font(opt.2)
@@ -639,7 +662,7 @@ struct LinkSheet: View {
                 HStack(spacing: 12) {
                     if !ed.state.link.isEmpty {
                         Button(tr("删除链接", "Remove")) {
-                            ed.call("unlink")
+                            ed.act("unlink")
                             dismiss()
                         }
                         .buttonStyle(RetroButtonStyle(compact: true))
@@ -667,7 +690,7 @@ struct LinkSheet: View {
         if !u.contains(":") {
             u = u.contains("@") && !u.contains("/") ? "mailto:" + u : "https://" + u
         }
-        ed.call("link", u, text.trimmingCharacters(in: .whitespacesAndNewlines))
+        ed.act("link", u, text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }
 
@@ -703,7 +726,7 @@ struct TableSheet: View {
                     HStack {
                         Spacer()
                         Button(tr("插入", "Insert")) {
-                            ed.call("table", rows, cols, header, full, border)
+                            ed.act("table", rows, cols, header, full, border)
                             dismiss()
                         }
                         .buttonStyle(RetroButtonStyle(isDefault: true))
@@ -743,7 +766,7 @@ struct SymbolSheet: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 8), spacing: 8) {
                     ForEach(symbols, id: \.self) { s in
                         Button {
-                            ed.call("cmd", "insertText", s)
+                            ed.act("cmd", "insertText", s)
                             dismiss()
                         } label: {
                             Text(s).font(.system(size: 20)).frame(maxWidth: .infinity, minHeight: 38)

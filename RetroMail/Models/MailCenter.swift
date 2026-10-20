@@ -26,11 +26,12 @@ final class MailCenter: ObservableObject {
     /// - interactive：打开邮件、标记、移动、删除（用户正在等的操作）
     /// - sync：刷新邮件列表、加载更早的邮件、搜索
     /// - background：未读数、会话关联查找、预取正文
+    /// - actions：移动、删除、标记等排队操作（MailActions），不和打开邮件抢连接
     enum Lane: String, CaseIterable {
-        case interactive, sync, background
+        case interactive, sync, background, actions
     }
 
-    private var clients: [String: IMAPClient] = [:]
+    var clients: [String: IMAPClient] = [:]
 
     private init() {}
 
@@ -192,7 +193,7 @@ final class MailCenter: ObservableObject {
         if a.saveToSent, let sent = folder(a, role: .sent) {
             let copy = await Task.detached { MIMEBuilder.build(mail, includeBcc: true) }.value
             let path = sent.path
-            _ = try? await c.perform { try await $0.append(path, message: copy, flags: "\\Seen") }
+            _ = try? await c.perform(timeout: 240) { try await $0.append(path, message: copy, flags: "\\Seen") }
         }
         if let ref = answered {
             _ = try? await c.perform { try await $0.store(ref.folder, uids: [ref.uid], flag: "\\Answered", add: true) }
@@ -210,7 +211,7 @@ final class MailCenter: ObservableObject {
         let data = await Task.detached { MIMEBuilder.build(mail, includeBcc: true) }.value
         let path = drafts.path
         let c = client(for: a)
-        try await c.perform { try await $0.append(path, message: data, flags: "\\Draft \\Seen") }
+        try await c.perform(timeout: 240) { try await $0.append(path, message: data, flags: "\\Draft \\Seen") }
         if let ref = replacing {
             _ = try? await c.perform { try await $0.delete(ref.folder, uids: [ref.uid], trash: nil) }
         }
@@ -258,7 +259,9 @@ enum BackgroundRefresh {
                     let fresh = try await client.perform { try await $0.fetchSince("INBOX", uid: last) }
                     let unseen = fresh.filter { !$0.seen }
                     if !unseen.isEmpty {
-                        await MailNotifier.post(unseen, account: a, folder: "INBOX", client: client)
+                        let uids = Array(unseen.map(\.uid).prefix(8))
+                        let raw = (try? await client.perform { try await $0.fetchPreviews("INBOX", uids: uids, bytes: 1200) }) ?? [:]
+                        await MailNotifier.post(unseen, account: a, folder: "INBOX", previews: raw)
                     }
                 }
                 if MailPrefs.badge {

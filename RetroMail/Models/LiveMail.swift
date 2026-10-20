@@ -2,6 +2,8 @@ import Foundation
 import SwiftUI
 import UIKit
 import UserNotifications
+import Network
+import AVFoundation
 
 // MARK: - 设置
 
@@ -10,6 +12,7 @@ enum MailPrefs {
     static let previewKey = "mail.notifyPreview"
     static let idleKey = "mail.useIdle"
     static let badgeKey = "mail.badge"
+    static let keepAliveKey = "mail.backgroundKeepAlive"
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
@@ -18,6 +21,7 @@ enum MailPrefs {
             previewKey: true,
             idleKey: true,
             badgeKey: true,
+            keepAliveKey: true,
         ])
     }
 
@@ -25,6 +29,95 @@ enum MailPrefs {
     static var showPreview: Bool { UserDefaults.standard.bool(forKey: previewKey) }
     static var useIdle: Bool { UserDefaults.standard.bool(forKey: idleKey) }
     static var badge: Bool { UserDefaults.standard.bool(forKey: badgeKey) }
+    static var keepAlive: Bool { UserDefaults.standard.bool(forKey: keepAliveKey) }
+}
+
+// MARK: - 后台保持在线
+
+/// 自签应用用不了苹果推送服务。为了在后台也能“秒到”，可以让应用在后台保持运行（播放无声音频，和音乐同时存在、不会打断），
+/// 这样 IDLE 连接一直在线，新邮件一到就推送通知。代价是会多耗一些电。
+@MainActor
+final class BackgroundKeeper {
+    static let shared = BackgroundKeeper()
+    private var engine: AVAudioEngine?
+    private var player: AVAudioPlayerNode?
+    private var observers: [NSObjectProtocol] = []
+
+    var isRunning: Bool { engine?.isRunning ?? false }
+
+    func start() {
+        guard engine == nil else { return }
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try session.setActive(true)
+            let e = AVAudioEngine()
+            let p = AVAudioPlayerNode()
+            e.attach(p)
+            let format = e.mainMixerNode.outputFormat(forBus: 0)
+            e.connect(p, to: e.mainMixerNode, format: format)
+            e.mainMixerNode.outputVolume = 0
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(format.sampleRate)) else { return }
+            buffer.frameLength = buffer.frameCapacity   // 全是 0：无声
+            try e.start()
+            p.scheduleBuffer(buffer, at: nil, options: .loops)
+            p.play()
+            engine = e
+            player = p
+            // 被电话等打断后自动恢复
+            observers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { n in
+                guard let raw = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
+                Task { @MainActor in
+                    BackgroundKeeper.shared.stop()
+                    BackgroundKeeper.shared.start()
+                }
+            })
+        } catch {
+            stop()
+        }
+    }
+
+    func stop() {
+        player?.stop()
+        engine?.stop()
+        player = nil
+        engine = nil
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers = []
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    }
+}
+
+final class BackgroundTaskBox {
+    var id: UIBackgroundTaskIdentifier = .invalid
+}
+
+// MARK: - 网络变化
+
+@MainActor
+final class NetworkWatcher {
+    static let shared = NetworkWatcher()
+    private let monitor = NWPathMonitor()
+    private(set) var online = true
+    private var started = false
+
+    func start() {
+        guard !started else { return }
+        started = true
+        monitor.pathUpdateHandler = { path in
+            let ok = path.status == .satisfied
+            Task { @MainActor in
+                let was = NetworkWatcher.shared.online
+                NetworkWatcher.shared.online = ok
+                // 网络恢复（或从 Wi-Fi 切到蜂窝）：旧连接多半已经失效，马上重连并补发积压的操作
+                if ok && !was {
+                    MailCenter.shared.networkChanged()
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "retromail.net"))
+    }
 }
 
 // MARK: - 操作提示（“已移到归档 · 撤销”）
@@ -47,17 +140,31 @@ struct OpenRequest: Equatable {
 // MARK: - 实时收信：IDLE + 定时检查
 
 extension MailCenter {
-    /// 应用回到前台：立即检查一次，然后用 IDLE 等新邮件，同时按设置的间隔定时检查。
+    /// 回到前台（或后台保持在线时）：立即检查一次，然后用 IDLE 等新邮件，同时按设置的间隔定时检查。
     func startLive() {
+        NetworkWatcher.shared.start()
+        BackgroundKeeper.shared.stop()
+        if !liveTasks.isEmpty && !idleConnections.isEmpty {
+            // 已经在线（从后台保持在线状态回来）：只补一次检查
+            Task { await checkAll(lists: true, full: true) }
+            MailActions.shared.kickAll()
+            return
+        }
         stopLive()
+        MailActions.shared.kickAll()
         liveTasks.append(Task { [weak self] in
             guard let self = self else { return }
-            await self.checkAll(lists: true)
+            await self.checkAll(lists: true, full: true)
+            var tick = 0
             while !Task.isCancelled {
                 let minutes = max(1, MailPrefs.autoRefreshMinutes)
                 try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
                 if Task.isCancelled { return }
-                if MailPrefs.autoRefreshMinutes > 0 { await self.checkAll(lists: true) }
+                tick += 1
+                if MailPrefs.autoRefreshMinutes > 0 {
+                    // 每次只查收件箱和正在看的列表；所有文件夹的未读数每 10 分钟查一次
+                    await self.checkAll(lists: true, full: tick * minutes % 10 == 0)
+                }
             }
         })
         if MailPrefs.useIdle {
@@ -74,15 +181,67 @@ extension MailCenter {
         idleConnections = [:]
     }
 
-    /// 检查所有账户的新邮件，更新未读数，并刷新正在显示的列表。
-    func checkAll(lists: Bool) async {
+    /// 切到后台：开了“后台保持在线”就继续 IDLE；否则给 30 秒把排队的操作发完再断开。
+    func enterBackground() {
+        if MailPrefs.keepAlive && MailPrefs.useIdle && !AccountStore.shared.accounts.isEmpty {
+            BackgroundKeeper.shared.start()
+            if BackgroundKeeper.shared.isRunning {
+                if liveTasks.isEmpty { startLiveKeepingAudio() }
+                return
+            }
+        }
+        let box = BackgroundTaskBox()
+        box.id = UIApplication.shared.beginBackgroundTask(withName: "flush") {
+            UIApplication.shared.endBackgroundTask(box.id)
+            box.id = .invalid
+        }
+        Task {
+            MailActions.shared.kickAll()
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            if UIApplication.shared.applicationState == .background && !BackgroundKeeper.shared.isRunning {
+                self.stopLive()
+            }
+            if box.id != .invalid {
+                UIApplication.shared.endBackgroundTask(box.id)
+                box.id = .invalid
+            }
+        }
+    }
+
+    private func startLiveKeepingAudio() {
+        let keep = BackgroundKeeper.shared.isRunning
+        startLive()
+        if keep { BackgroundKeeper.shared.start() }
+    }
+
+    /// 网络恢复：断开所有旧连接重新来过。
+    func networkChanged() {
         for a in AccountStore.shared.accounts {
-            await checkNewMail(a)
-            await refreshUnread(a)
+            for lane in Lane.allCases {
+                if let c = clients.removeValue(forKey: a.id.uuidString + "|" + lane.rawValue) {
+                    Task { await c.shutdown() }
+                }
+            }
+        }
+        let keep = BackgroundKeeper.shared.isRunning
+        stopLive()
+        startLive()
+        if keep { BackgroundKeeper.shared.start() }
+    }
+
+    /// 检查所有账户的新邮件，更新未读数，并刷新正在显示的列表。
+    func checkAll(lists: Bool, full: Bool = false) async {
+        await withTaskGroup(of: Void.self) { g in
+            for a in AccountStore.shared.accounts {
+                g.addTask { @MainActor in
+                    await self.checkNewMail(a)
+                    if full { await self.refreshUnread(a) }
+                }
+            }
         }
         lastUpdated = Date()
         if lists {
-            for m in MessageListModel.liveModels() where !m.loading {
+            for m in MessageListModel.liveModels() {
                 await m.refresh()
             }
         }
@@ -104,11 +263,10 @@ extension MailCenter {
                 failures = 0
                 let inbox = folder(a, role: .inbox)?.path ?? "INBOX"
                 while !Task.isCancelled {
-                    // 大多数服务器 30 分钟断开 IDLE，这里 9 分钟重新进入一次
-                    let changed = try await conn.idleOnce(inbox, maxWait: 540)
+                    // 大多数服务器 30 分钟断开 IDLE；这里 8 分钟重新进入一次（顺便确认连接还活着）
+                    let changed = try await conn.idleOnce(inbox, maxWait: 480)
                     if changed {
-                        await checkNewMail(a)
-                        await refreshUnread(a, paths: [inbox])
+                        await checkNewMail(a, on: conn)
                         for m in MessageListModel.liveModels() where m.account.id == a.id && m.folder.path == inbox {
                             await m.refresh()
                         }
@@ -119,24 +277,34 @@ extension MailCenter {
                 conn.close()
                 if Task.isCancelled { return }
                 failures += 1
-                // 超时属于正常情况，马上重连；连续失败则逐渐放慢
-                let wait = failures <= 1 ? 2 : min(300, 15 * failures)
+                // 超时（每 8 分钟一次）属于正常情况，马上重连；连续失败则逐渐放慢；没网时等网络恢复的通知
+                let wait = failures <= 1 ? 1 : min(120, 10 * failures)
                 try? await Task.sleep(nanoseconds: UInt64(wait) * 1_000_000_000)
             }
         }
     }
 
     /// 收件箱里有没有新邮件；有的话发通知。
-    func checkNewMail(_ a: MailAccount) async {
+    /// conn：IDLE 刚收到通知时直接用那条连接查，不用排队等别的连接。
+    func checkNewMail(_ a: MailAccount, on conn: IMAPConnection? = nil) async {
         let inbox = folder(a, role: .inbox)?.path ?? "INBOX"
-        let c = client(for: a, .background)
-        guard let st = try? await c.perform({ try await $0.status(inbox) }) else { return }
+        let bg = client(for: a, .background)
+        func run<T>(_ op: (IMAPConnection) async throws -> T) async throws -> T {
+            if let c = conn { return try await op(c) }
+            return try await bg.perform(timeout: 30, op)
+        }
+        guard let st = try? await run({ try await $0.status(inbox) }) else { return }
         let last = BackgroundRefresh.lastUID(a.id)
         if last > 0, st.uidNext > last,
-           let fresh = try? await c.perform({ try await $0.fetchSince(inbox, uid: last) }) {
+           let fresh = try? await run({ try await $0.fetchSince(inbox, uid: last) }) {
             let unseen = fresh.filter { !$0.seen }
             if !unseen.isEmpty {
-                await MailNotifier.post(unseen, account: a, folder: inbox, client: c)
+                var previews: [Int: Data] = [:]
+                if MailPrefs.showPreview {
+                    let uids = Array(unseen.map(\.uid).prefix(8))
+                    previews = (try? await run({ try await $0.fetchPreviews(inbox, uids: uids, bytes: 1200) })) ?? [:]
+                }
+                await MailNotifier.post(unseen, account: a, folder: inbox, previews: previews)
             }
         }
         if st.uidNext > 0 { BackgroundRefresh.setLastUID(a.id, st.uidNext) }
@@ -243,17 +411,13 @@ enum MailNotifier {
     }
 
     /// 新邮件通知：标题是发件人，副标题是主题，正文是邮件开头几行；同一会话的通知叠在一起。
-    static func post(_ msgs: [MessageSummary], account a: MailAccount, folder: String, client: IMAPClient?) async {
+    static func post(_ msgs: [MessageSummary], account a: MailAccount, folder: String, previews raw: [Int: Data]) async {
         guard BackgroundRefresh.enabled else { return }
         let list = Array(msgs.sorted(by: MessageSummary.newestFirst).prefix(8))
         var previews: [Int: String] = [:]
-        if MailPrefs.showPreview, let c = client {
-            if let raw = try? await c.perform({ try await $0.fetchPreviews(folder, uids: list.map(\.uid), bytes: 1200) }) {
-                for m in list {
-                    if let d = raw[m.uid] {
-                        previews[m.uid] = PreviewText.extract(d, contentType: m.contentType, transferEncoding: m.transferEncoding)
-                    }
-                }
+        for m in list {
+            if let d = raw[m.uid] {
+                previews[m.uid] = PreviewText.extract(d, contentType: m.contentType, transferEncoding: m.transferEncoding)
             }
         }
         let multi = AccountStore.loadFromDisk().count > 1

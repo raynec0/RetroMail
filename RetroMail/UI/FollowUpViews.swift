@@ -302,6 +302,14 @@ struct FollowUpEditor: View {
         if x.reminderItemId != nil {
             Task { _ = try? await RemindersBridge.upsert(x) }
         }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        var parts: [String] = []
+        if x.flagged { parts.append(tr("旗标", "flag")) }
+        if let r = x.reminder { parts.append(tr("提醒 ", "reminder ") + Fmt.compact(r)) }
+        if let d = x.deadline { parts.append(tr("截止 ", "due ") + Fmt.compact(d)) }
+        if !x.note.isEmpty { parts.append(tr("备注", "note")) }
+        MailCenter.shared.showToast(MailToast(text: x.isEmpty ? tr("已移除跟进", "Follow-up removed")
+                                                  : tr("已保存：", "Saved: ") + parts.joined(separator: " · "), undo: nil))
         dismiss()
     }
 

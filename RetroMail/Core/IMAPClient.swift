@@ -18,6 +18,8 @@ final class IMAPConnection: @unchecked Sendable {
     private(set) var capabilities: Set<String> = []
     private(set) var selected: String?
     private(set) var selectedExists = 0
+    private(set) var selectedUIDValidity = 0
+    private(set) var selectedUIDNext = 0
 
     static let summaryItems = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID CONTENT-TYPE CONTENT-TRANSFER-ENCODING IN-REPLY-TO REFERENCES)])"
 
@@ -315,7 +317,60 @@ final class IMAPConnection: @unchecked Sendable {
         }
         selected = path
         selectedExists = exists
+        selectedUIDValidity = 0
+        selectedUIDNext = 0
+        for d in r.untagged {
+            let line = String(decoding: d, as: UTF8.self).uppercased()
+            if let v = Self.bracketNumber(line, "UIDVALIDITY") { selectedUIDValidity = v }
+            if let v = Self.bracketNumber(line, "UIDNEXT") { selectedUIDNext = v }
+        }
         return exists
+    }
+
+    private static func bracketNumber(_ line: String, _ key: String) -> Int? {
+        guard let r = line.range(of: "[" + key + " ") else { return nil }
+        let digits = line[r.upperBound...].prefix { $0.isNumber }
+        return Int(digits)
+    }
+
+    struct SyncResult {
+        var newMessages: [MessageSummary]
+        /// 已知邮件的最新旗标；不在里面的说明已被删除或移走
+        var flags: [Int: [String]]
+        var exists: Int
+        var uidValidity: Int
+        var uidNext: Int
+    }
+
+    /// 增量同步：只取比 sinceUID 新的邮件信头，再取一遍已知邮件的旗标（很便宜），找出已删除的。
+    /// 比每次重新下载 60 封信头快得多。
+    func syncFolder(_ path: String, known: [Int], sinceUID: Int) async throws -> SyncResult {
+        try await select(path, force: true)
+        var fresh: [MessageSummary] = []
+        if selectedUIDNext == 0 || selectedUIDNext > sinceUID + 1 {
+            let r = try await run("UID FETCH \(sinceUID + 1):* \(Self.summaryItems)")
+            fresh = Self.parseSummaries(r.untagged).filter { $0.uid > sinceUID }
+        }
+        var flags: [Int: [String]] = [:]
+        if !known.isEmpty {
+            let r = try await run("UID FETCH \(Self.uidSet(known)) (UID FLAGS)")
+            for d in r.untagged {
+                let v = IMAPParser.parse(d)
+                guard v.count >= 4, v[2].string?.uppercased() == "FETCH", let items = v[3].list else { continue }
+                var uid: Int?
+                var f: [String] = []
+                var k = 0
+                while k + 1 < items.count {
+                    let key = (items[k].string ?? "").uppercased()
+                    if key == "UID" { uid = Int(items[k + 1].string ?? "") }
+                    if key == "FLAGS" { f = (items[k + 1].list ?? []).compactMap { $0.string } }
+                    k += 2
+                }
+                if let u = uid { flags[u] = f }
+            }
+        }
+        return SyncResult(newMessages: fresh, flags: flags, exists: selectedExists,
+                          uidValidity: selectedUIDValidity, uidNext: selectedUIDNext)
     }
 
     // MARK: - 邮件列表
@@ -549,6 +604,7 @@ final class IMAPConnection: @unchecked Sendable {
         while !changed {
             let r = try await readResponse()
             let u = String(decoding: r, as: UTF8.self).uppercased()
+            if u.hasPrefix("* BYE") { throw MailError.closed }
             if u.hasPrefix("*") && (u.contains(" EXISTS") || u.contains(" RECENT") || u.contains(" EXPUNGE") || u.contains(" FETCH")) {
                 changed = true
             }
@@ -587,6 +643,8 @@ final class IMAPClient: @unchecked Sendable {
     private let lock = AsyncLock()
     private var connection: IMAPConnection?
     private var lastUsed = Date.distantPast
+    private var currentToken: UUID?
+    private var timedOut = false
 
     /// 超过这个时间没用过的连接，先发 NOOP 确认还活着（手机切后台后连接常被静默断开）。
     static let idleProbeAfter: TimeInterval = 120
@@ -595,15 +653,36 @@ final class IMAPClient: @unchecked Sendable {
         self.config = config
     }
 
-    func perform<T>(_ op: (IMAPConnection) async throws -> T) async throws -> T {
+    /// 串行执行一个操作。timeout 秒内没完成就断开连接并报错（不会无限卡住，也不会拖住后面排队的操作）。
+    func perform<T>(timeout: TimeInterval = 60, _ op: (IMAPConnection) async throws -> T) async throws -> T {
         await lock.lock()
+        let token = UUID()
+        currentToken = token
+        timedOut = false
+        let watchdog = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            guard !Task.isCancelled, let self = self, self.currentToken == token else { return }
+            self.timedOut = true
+            self.connection?.close()
+        }
+        defer { watchdog.cancel() }
         do {
             let r = try await attempt(op)
             lastUsed = Date()
+            currentToken = nil
             await lock.unlock()
             return r
         } catch {
+            let hit = timedOut
+            currentToken = nil
+            if hit {
+                connection?.close()
+                connection = nil
+            }
             await lock.unlock()
+            if hit {
+                throw MailError.connection(tr("服务器响应超时，已自动断开重连。", "The server timed out; reconnecting."))
+            }
             throw error
         }
     }
@@ -631,9 +710,11 @@ final class IMAPClient: @unchecked Sendable {
                 conn = c
             } else {
                 let c = IMAPConnection(config: config)
+                connection = c   // 让超时看门狗能断开正在握手的连接
                 do {
                     try await c.connect()
                 } catch {
+                    connection = nil
                     c.close()
                     throw error
                 }
@@ -646,7 +727,7 @@ final class IMAPClient: @unchecked Sendable {
             } catch let e as MailError where e.isConnectionError {
                 conn.close()
                 connection = nil
-                if retried { throw e }
+                if retried || timedOut { throw e }
                 retried = true
             }
         }

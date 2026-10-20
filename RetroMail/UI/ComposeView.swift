@@ -448,7 +448,7 @@ struct ComposeView: View {
                 mime = "image/jpeg"
             }
             if let d = out {
-                ed.call("image", "data:\(mime);base64,\(d.base64EncodedString())")
+                ed.act("image", "data:\(mime);base64,\(d.base64EncodedString())")
             }
         }
         inlinePhotos = []

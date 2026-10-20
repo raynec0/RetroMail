@@ -130,7 +130,7 @@ final class MailSocket: NSObject, URLSessionStreamDelegate, @unchecked Sendable 
     func write(_ data: Data) async throws {
         guard let t = task, !isClosed else { throw MailError.closed }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            t.write(data, timeout: 300) { error in
+            t.write(data, timeout: max(30, Double(data.count) / 50_000)) { error in
                 if let error = error {
                     cont.resume(throwing: MailError.connection(error.localizedDescription))
                 } else {

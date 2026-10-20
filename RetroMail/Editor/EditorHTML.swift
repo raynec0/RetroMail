@@ -125,7 +125,36 @@ enum EditorHTML {
       return out;
     }
 
+    function fmtKey() {
+      var k = '';
+      ['bold', 'italic', 'underline', 'strikeThrough', 'superscript', 'subscript', 'insertUnorderedList', 'insertOrderedList',
+       'justifyLeft', 'justifyCenter', 'justifyRight', 'justifyFull'].forEach(function (c) {
+        try { k += document.queryCommandState(c) ? '1' : '0'; } catch (e) { k += '0'; }
+      });
+      try { k += '|' + document.queryCommandValue('formatBlock'); } catch (e) {}
+      return k;
+    }
     var RE = {
+      /// 执行一个命令，并告诉原生界面它有没有生效（用于操作反馈）。
+      run: function (name, args) {
+        var before = ed.innerHTML;
+        var hadSel = !!(saved && !saved.collapsed && saved.toString().length);
+        var inTable = !!closest('td,th');
+        var onLink = !!closest('a');
+        var hadFocus = document.activeElement === ed || !!saved;
+        var k0 = fmtKey();
+        var ret = null;
+        try {
+          if (typeof RE[name] !== 'function') return { ok: false, error: 'no such command' };
+          ret = RE[name].apply(null, args || []);
+        } catch (e) {
+          return { ok: false, error: String(e && e.message || e) };
+        }
+        var after = ed.innerHTML;
+        return { ok: true, changed: before !== after, formatChanged: fmtKey() !== k0, hadSel: hadSel,
+                 inTable: inTable, onLink: onLink, hadFocus: hadFocus, painter: !!painter,
+                 ret: (ret === undefined ? null : ret) };
+      },
       cmd: function (c, v) {
         restore();
         document.execCommand(c, false, (v === undefined || v === null) ? null : v);
@@ -220,14 +249,14 @@ enum EditorHTML {
         RE.cmd('insertHTML', h);
       },
       addRow: function (after) {
-        restore(); var c = cell(); if (!c) return;
+        restore(); var c = cell(); if (!c) return 'notable';
         var row = c.parentNode; var nr = row.cloneNode(true);
         for (var i = 0; i < nr.cells.length; i++) { nr.cells[i].innerHTML = '<br>'; }
         row.parentNode.insertBefore(nr, after ? row.nextSibling : row);
         changed();
       },
       addCol: function (after) {
-        restore(); var c = cell(); if (!c) return;
+        restore(); var c = cell(); if (!c) return 'notable';
         var idx = c.cellIndex; var t = c.closest('table');
         for (var i = 0; i < t.rows.length; i++) {
           var row = t.rows[i];
@@ -239,13 +268,13 @@ enum EditorHTML {
         changed();
       },
       delRow: function () {
-        restore(); var c = cell(); if (!c) return;
+        restore(); var c = cell(); if (!c) return 'notable';
         var t = c.closest('table'); c.parentNode.remove();
         if (!t.rows.length) t.remove();
         changed();
       },
       delCol: function () {
-        restore(); var c = cell(); if (!c) return;
+        restore(); var c = cell(); if (!c) return 'notable';
         var idx = c.cellIndex; var t = c.closest('table');
         for (var i = t.rows.length - 1; i >= 0; i--) {
           var row = t.rows[i];
@@ -255,22 +284,22 @@ enum EditorHTML {
         if (!t.rows.length) t.remove();
         changed();
       },
-      delTable: function () { restore(); var t = closest('table'); if (t) t.remove(); changed(); },
+      delTable: function () { restore(); var t = closest('table'); if (!t) return 'notable'; t.remove(); changed(); },
       merge: function () {
-        restore(); var c = cell(); if (!c) return;
-        var n = c.nextElementSibling; if (!n) return;
+        restore(); var c = cell(); if (!c) return 'notable';
+        var n = c.nextElementSibling; if (!n) return 'nonext';
         c.colSpan = (c.colSpan || 1) + (n.colSpan || 1);
         if (n.textContent.trim()) c.innerHTML += ' ' + n.innerHTML;
         n.remove();
         changed();
       },
-      cellFill: function (color) { restore(); selectedCells().forEach(function (c) { c.style.backgroundColor = color || ''; }); changed(); },
+      cellFill: function (color) { restore(); var cs = selectedCells(); if (!cs.length) return 'notable'; cs.forEach(function (c) { c.style.backgroundColor = color || ''; }); changed(); },
       border: function (style) {
-        restore(); var t = closest('table'); if (!t) return;
+        restore(); var t = closest('table'); if (!t) return 'notable';
         t.querySelectorAll('td,th').forEach(function (c) { c.style.border = style; });
         changed();
       },
-      tableWidth: function (full) { restore(); var t = closest('table'); if (t) t.style.width = full ? '100%' : ''; changed(); },
+      tableWidth: function (full) { restore(); var t = closest('table'); if (!t) return 'notable'; t.style.width = full ? '100%' : ''; changed(); },
       replaceAll: function (find, rep, cs) {
         if (!find) return 0;
         var re = new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), cs ? 'g' : 'gi');
@@ -289,7 +318,7 @@ enum EditorHTML {
         try { ed.focus(); return window.find(find, !!cs, false, true, false, false, false); } catch (e) { return false; }
       },
       changeCase: function (mode) {
-        restore(); var t = sel().toString(); if (!t) return;
+        restore(); var t = sel().toString(); if (!t) return 'nosel';
         var o = mode === 'upper' ? t.toUpperCase() : mode === 'lower' ? t.toLowerCase()
           : t.toLowerCase().replace(/(^|[\s(\-])\S/g, function (x) { return x.toUpperCase(); });
         document.execCommand('insertText', false, o);
@@ -298,7 +327,7 @@ enum EditorHTML {
       copyFormat: function () {
         restore();
         var n = anchor(); if (n && n.nodeType === 3) n = n.parentNode;
-        if (!n || n.nodeType !== 1) return;
+        if (!n || n.nodeType !== 1) return 'nosel';
         var cs = getComputedStyle(n);
         painter = {
           b: document.queryCommandState('bold'), i: document.queryCommandState('italic'),
@@ -308,9 +337,9 @@ enum EditorHTML {
         report();
       },
       pasteFormat: function () {
-        if (!painter) return false;
+        if (!painter) return 'nopainter';
         restore();
-        if (sel().isCollapsed) return false;
+        if (sel().isCollapsed) return 'nosel';
         var p = painter; painter = null;
         document.execCommand('removeFormat');
         if (p.b) document.execCommand('bold');

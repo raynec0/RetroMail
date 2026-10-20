@@ -99,10 +99,8 @@ final class ConversationModel: ObservableObject {
             let uid = item.summary.uid
             Task { await list.setFlagged([uid], on) }
         } else {
-            let folder = item.folder
-            let uid = item.summary.uid
-            let c = MailCenter.shared.client(for: account, .interactive)
-            Task { _ = try? await c.perform { try await $0.store(folder, uids: [uid], flag: "\\Flagged", add: on) } }
+            MailActions.shared.enqueue(PendingAction(account: account.id, folder: item.folder, uids: [item.summary.uid],
+                                                     kind: .flag, flag: "\\Flagged", on: on))
         }
     }
 
@@ -142,8 +140,10 @@ final class ConversationModel: ObservableObject {
         guard let idx = items.firstIndex(where: { $0.id == id }), items[idx].display == nil,
               !inFlight.contains(id) else { return }
         let item = items[idx]
-        let path = item.folder
-        let uid = item.summary.uid
+        // 刚移过来、服务器还没确认的邮件：从原来的位置读取
+        let real = MailActions.shared.resolve(account: account.id, folder: item.folder, uid: item.summary.uid)
+        let path = real?.folder ?? item.folder
+        let uid = real?.uid ?? item.summary.uid
         let accountId = account.id
         let cached = await Task.detached { DiskCache.loadRaw(account: accountId, folder: path, uid: uid) }.value
         if prefetch && cached == nil && item.summary.size > Self.prefetchLimit { return }
@@ -155,7 +155,7 @@ final class ConversationModel: ObservableObject {
                 raw = c
             } else {
                 let client = MailCenter.shared.client(for: account, lane)
-                raw = try await client.perform { try await $0.fetchRaw(path, uid: uid) }
+                raw = try await client.perform(timeout: 240) { try await $0.fetchRaw(path, uid: uid) }
                 Task.detached { DiskCache.saveRaw(raw, account: accountId, folder: path, uid: uid) }
             }
             // 解析和所有显示计算都在后台完成，主线程只接收结果
@@ -181,13 +181,8 @@ final class ConversationModel: ObservableObject {
             await list.delete([item.summary.uid])
         } else {
             let trash = MailCenter.shared.folder(account, role: .trash)?.path
-            let path = item.folder
-            let uid = item.summary.uid
-            do {
-                _ = try await list.client.perform { try await $0.delete(path, uids: [uid], trash: trash) }
-            } catch {
-                self.error = error.localizedDescription
-            }
+            MailActions.shared.enqueue(PendingAction(account: account.id, folder: item.folder, uids: [item.summary.uid],
+                                                     kind: .delete, dest: trash == item.folder ? nil : trash, messages: [item.summary]))
         }
     }
 
@@ -311,10 +306,8 @@ struct ConversationView: View {
         .ios3ActionSheet(isPresented: $showDelete, actions: [
             SheetAction(model.items.count > 1 ? tr("删除整个会话", "Delete Conversation") : tr("删除邮件", "Delete Message"), role: .destructive) {
                 let uids = model.currentUIDs
-                Task {
-                    await model.list.delete(uids)
-                    dismiss()
-                }
+                Task { await model.list.delete(uids) }
+                dismiss()
             },
         ])
         .fullScreenCover(item: $compose) {
@@ -340,10 +333,8 @@ struct ConversationView: View {
         .sheet(isPresented: $showMove) {
             FolderPickerView(account: model.account, excluding: model.currentFolder) { dest in
                 let uids = model.currentUIDs
-                Task {
-                    await model.list.move(uids, to: dest)
-                    dismiss()
-                }
+                Task { await model.list.move(uids, to: dest) }
+                dismiss()
             }
             .preferredColorScheme(settings.colorScheme)
         }
@@ -499,10 +490,9 @@ struct ConversationView: View {
             list.append(SheetAction(tr("全屏查看", "View Full Screen")) { fullscreen = it })
             if it.folder == model.currentFolder {
                 list.append(SheetAction(tr("标为未读", "Mark as Unread")) {
-                    Task {
-                        await model.list.setSeen([it.summary.uid], false)
-                        dismiss()
-                    }
+                    Task { await model.list.setSeen([it.summary.uid], false) }
+                    MailCenter.shared.showToast(MailToast(text: tr("已标为未读", "Marked as unread"), undo: nil))
+                    dismiss()
                 })
             }
             list.append(SheetAction(tr("删除这封邮件", "Delete This Message"), role: .destructive) {
@@ -531,6 +521,8 @@ struct ConversationView: View {
         f.flagged = on
         followUps.save(f)
         model.setFlag(it, on)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        MailCenter.shared.showToast(MailToast(text: on ? tr("已加旗标", "Flagged") : tr("已取消旗标", "Unflagged"), undo: nil))
     }
 
     private var toolbar: some View {
@@ -538,10 +530,8 @@ struct ConversationView: View {
             if MailCenter.shared.folder(model.account, role: .archive) != nil && model.list.folder.role != .archive {
                 ToolbarIcon(symbol: "archivebox", label: tr("归档", "Archive")) {
                     let uids = model.currentUIDs
-                    Task {
-                        await model.list.archive(uids)
-                        dismiss()
-                    }
+                    Task { await model.list.archive(uids) }
+                    dismiss()
                 }
             } else {
                 ToolbarIcon(symbol: "arrow.clockwise", label: tr("刷新", "Refresh")) {

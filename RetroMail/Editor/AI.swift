@@ -19,7 +19,7 @@ enum AIProvider: String, Codable, CaseIterable, Identifiable {
 
     var detail: String {
         switch self {
-        case .chatgpt: return tr("用 ChatGPT 账号登录（OpenAI 官方“Sign in with ChatGPT”），直接用你的 Plus / Pro 订阅额度，不需要 API Key。", "Sign in with your ChatGPT account (OpenAI's official Sign in with ChatGPT) and use your Plus / Pro plan — no API key.")
+        case .chatgpt: return tr("用 ChatGPT 账号登录（和 Minis 相同的 Codex 登录），直接用 Plus / Pro / Team 订阅额度，不需要 API Key，Team 工作区也不用管理员批准。", "Sign in with your ChatGPT account (the same Codex sign-in Minis uses) and use your Plus / Pro / Team plan — no API key, no admin approval.")
         case .openai: return tr("API Key，按量计费。DeepSeek、通义、Kimi、智谱、中转服务都可以。", "API key, pay as you go. Works with DeepSeek, Qwen, Kimi, relays…")
         case .anthropic: return tr("Claude 的 API Key，按量计费。", "Claude API key, pay as you go.")
         case .apple: return tr("iPhone 上的 Apple 智能模型，免费、离线、不上传邮件。需要 iOS 26 和支持 Apple 智能的机型。", "Apple Intelligence model on your iPhone: free, offline, private. Needs iOS 26 on a supported device.")
@@ -112,7 +112,7 @@ struct AIConfig: Codable, Equatable {
         case .openai, .anthropic: return !c.baseURL.isEmpty && !c.model.isEmpty && !apiKey.isEmpty
         case .apple: return AppleAI.availability == nil
         case .handoff: return true
-        case .chatgpt: return Keychain.get("chatgpt.credentials") != nil
+        case .chatgpt: return ChatGPTAuth.hasStoredCredentials
         }
     }
 }
@@ -525,18 +525,18 @@ struct AIWriterSheet: View {
             } else {
                 if usedSelection {
                     Button(tr("替换选中文字", "Replace Selection")) {
-                        ed.call("replaceSelection", AIText.toHTML(result))
+                        ed.act("replaceSelection", AIText.toHTML(result))
                         dismiss()
                     }
                     .buttonStyle(RetroButtonStyle(isDefault: true, compact: true))
                 }
                 Button(tr("替换正文", "Replace Body")) {
-                    ed.call("replaceBody", AIText.toHTML(result))
+                    ed.act("replaceBody", AIText.toHTML(result))
                     dismiss()
                 }
                 .buttonStyle(RetroButtonStyle(isDefault: !usedSelection, compact: true))
                 Button(tr("插入到光标处", "Insert at Cursor")) {
-                    ed.call("insertHTML", AIText.toHTML(result))
+                    ed.act("insertHTML", AIText.toHTML(result))
                     dismiss()
                 }
                 .buttonStyle(RetroButtonStyle(compact: true))

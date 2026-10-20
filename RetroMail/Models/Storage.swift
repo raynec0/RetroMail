@@ -121,9 +121,15 @@ enum DiskCache {
         return u
     }
 
+    /// 磁盘写入都放到这条后台队列上，不占主线程（避免卡顿和被系统看门狗杀掉）
+    static let io = DispatchQueue(label: "retromail.disk", qos: .utility)
+
     static func saveList(_ list: [MessageSummary], account: UUID, folder: String) {
-        guard let d = try? JSONEncoder().encode(list) else { return }
-        try? d.write(to: dir(account).appendingPathComponent(fileName(["list", folder])))
+        let url = dir(account).appendingPathComponent(fileName(["list", folder]))
+        io.async {
+            guard let d = try? JSONEncoder().encode(list) else { return }
+            try? d.write(to: url, options: .atomic)
+        }
     }
 
     static func loadList(account: UUID, folder: String) -> [MessageSummary] {
@@ -134,8 +140,11 @@ enum DiskCache {
     }
 
     static func saveFolders(_ list: [MailFolder], account: UUID) {
-        guard let d = try? JSONEncoder().encode(list) else { return }
-        try? d.write(to: dir(account).appendingPathComponent("folders.json"))
+        let url = dir(account).appendingPathComponent("folders.json")
+        io.async {
+            guard let d = try? JSONEncoder().encode(list) else { return }
+            try? d.write(to: url, options: .atomic)
+        }
     }
 
     static func loadFolders(account: UUID) -> [MailFolder]? {
