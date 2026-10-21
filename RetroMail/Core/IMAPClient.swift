@@ -276,6 +276,16 @@ final class IMAPConnection: @unchecked Sendable {
         try await run([.text("DELETE "), Self.astring(path)])
     }
 
+    /// 按条件搜索（如 "UNSEEN"、"FLAGGED"、"SINCE 21-Oct-2026"），返回最新的 limit 封。
+    func searchCriteria(_ path: String, criteria: String, limit: Int) async throws -> [MessageSummary] {
+        try await select(path, force: true)
+        let r = try await run("UID SEARCH " + criteria)
+        let uids = Array(Self.parseSearch(r.untagged).sorted().suffix(limit))
+        guard !uids.isEmpty else { return [] }
+        let f = try await run("UID FETCH \(Self.uidSet(uids)) \(Self.summaryItems)")
+        return Self.parseSummaries(f.untagged)
+    }
+
     /// 服务器上加了旗标的邮件（最多 limit 封，新的在前）。
     func searchFlagged(_ path: String, limit: Int) async throws -> [MessageSummary] {
         try await select(path, force: true)

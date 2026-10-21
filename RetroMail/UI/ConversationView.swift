@@ -145,6 +145,12 @@ final class ConversationModel: ObservableObject {
         let path = real?.folder ?? item.folder
         let uid = real?.uid ?? item.summary.uid
         let accountId = account.id
+        // 内存里已经有解析好的结果：直接显示
+        if let d = DisplayCache.shared.get(accountId, path, uid) {
+            items[idx].display = d
+            items[idx].failed = false
+            return
+        }
         let cached = await Task.detached { DiskCache.loadRaw(account: accountId, folder: path, uid: uid) }.value
         if prefetch && cached == nil && item.summary.size > Self.prefetchLimit { return }
         inFlight.insert(id)
@@ -160,6 +166,7 @@ final class ConversationModel: ObservableObject {
             }
             // 解析和所有显示计算都在后台完成，主线程只接收结果
             let display = await MessageDisplay.make(raw)
+            DisplayCache.shared.set(display, accountId, path, uid)
             if let i = items.firstIndex(where: { $0.id == id }) {
                 items[i].display = display
                 items[i].failed = false
@@ -219,6 +226,22 @@ private enum ThreadRow: Identifiable {
     }
 }
 
+struct AIRequest: Identifiable {
+    let id = UUID()
+    let title: String
+    let context: String
+    let item: ThreadItem?
+}
+
+/// 拦截的发件人：收件箱里来自他们的新邮件自动移到垃圾邮件。
+enum BlockList {
+    private static let key = "mail.blockedSenders"
+    static var all: Set<String> { Set(UserDefaults.standard.stringArray(forKey: key) ?? []) }
+    static func contains(_ email: String) -> Bool { all.contains(email.lowercased()) }
+    static func add(_ email: String) { var s = all; s.insert(email.lowercased()); UserDefaults.standard.set(Array(s), forKey: key) }
+    static func remove(_ email: String) { var s = all; s.remove(email.lowercased()); UserDefaults.standard.set(Array(s), forKey: key) }
+}
+
 struct ConversationView: View {
     @StateObject private var model: ConversationModel
     @EnvironmentObject private var settings: AppSettings
@@ -227,7 +250,9 @@ struct ConversationView: View {
     @State private var compose: ComposeRequest?
     @State private var fullscreen: ThreadItem?
     @State private var showMove = false
-    @State private var showSummary = false
+    @State private var aiRequest: AIRequest?
+    @State private var snoozeFor: ThreadItem?
+    @State private var newEvent: NewEventRequest?
     @State private var showReply = false
     @State private var showDelete = false
     @State private var cardActionsFor: ThreadItem?
@@ -345,12 +370,30 @@ struct ConversationView: View {
                     .preferredColorScheme(settings.colorScheme)
             }
         }
-        .sheet(isPresented: $showSummary) {
-            AISummarySheet(threadText: model.threadText) { draft in
-                showSummary = false
-                startCompose(.replyAll, aiDraft: draft)
+        .sheet(item: $aiRequest) { req in
+            AIMailAssistant(title: req.title, context: req.context) { draft in
+                aiRequest = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    startCompose(.replyAll, item: req.item, aiDraft: draft)
+                }
             }
+            .environmentObject(settings)
             .preferredColorScheme(settings.colorScheme)
+        }
+        .ios3ActionSheet(isPresented: Binding(get: { snoozeFor != nil }, set: { if !$0 { snoozeFor = nil } }),
+                         title: tr("什么时候再处理？", "Snooze until…"),
+                         actions: Snooze.options.map { [snoozeFor] opt in
+                             SheetAction(opt.0) {
+                                 guard let it = snoozeFor else { return }
+                                 Snooze.snooze(it.summary, account: model.account, folder: it.folder, until: opt.1)
+                                 UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                 MailCenter.shared.showToast(MailToast(text: tr("已收起，", "Snoozed until ") + Fmt.compact(opt.1) + tr(" 再提醒你", ""), undo: nil))
+                                 dismiss()
+                             }
+                         })
+        .sheet(item: $newEvent) { req in
+            NewEventView(request: req, store: CalendarStore.shared.store)
+                .ignoresSafeArea()
         }
     }
 
@@ -374,6 +417,7 @@ struct ConversationView: View {
                         ProgressView().scaleEffect(0.6)
                     }
                     Spacer(minLength: 4)
+                    aiButton
                     Button(allExpanded ? tr("全部折叠", "Collapse All") : tr("全部展开", "Expand All")) {
                         withAnimation(.easeOut(duration: 0.18)) { toggleAll() }
                     }
@@ -384,7 +428,27 @@ struct ConversationView: View {
             }
             .padding(.horizontal, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            HStack {
+                Spacer()
+                aiButton
+            }
+            .padding(.horizontal, 2)
         }
+    }
+
+    /// 点了才用 AI：总结 + 问答
+    private var aiButton: some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            if model.items.count == 1, let it = model.items.first { openAI(item: it) } else { openAI(item: nil) }
+        } label: {
+            Text(tr("✨ AI 总结 · 问答", "✨ AI Summary · Ask"))
+                .lineLimit(1)
+        }
+        .buttonStyle(RetroButtonStyle(isDefault: true, compact: true))
+        .fixedSize()
+        .disabled(model.latestParsed == nil)
     }
 
     private var allExpanded: Bool {
@@ -487,7 +551,30 @@ struct ConversationView: View {
                                                     : tr("编辑跟进…", "Edit Follow-up…")) { openFollowUp(it) })
             let flaggedNow = existing?.flagged ?? it.summary.flagged
             list.append(SheetAction(flaggedNow ? tr("取消旗标", "Unflag") : tr("加旗标", "Flag")) { quickFlag(it, !flaggedNow) })
+            list.append(SheetAction(tr("✨ AI 分析这封邮件", "✨ AI: Analyze This Message")) { openAI(item: it) })
+            if it.folder == model.currentFolder {
+                list.append(SheetAction(tr("稍后处理…（暂时收起，到时提醒）", "Snooze… (hide until later)")) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { snoozeFor = it }
+                })
+            }
+            list.append(SheetAction(tr("添加到日历…", "Add to Calendar…")) { addToCalendar(it) })
             list.append(SheetAction(tr("全屏查看", "View Full Screen")) { fullscreen = it })
+            if let d = it.display {
+                list.append(SheetAction(tr("打印 / 存为 PDF", "Print / Save as PDF")) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        MailPrinter.print(html: d.page(remote: true, hideQuotes: false), title: d.parsed.subject)
+                    }
+                })
+            }
+            if let u = it.parsed?.listUnsubscribe, !u.isEmpty {
+                list.append(SheetAction(tr("退订这类邮件", "Unsubscribe")) { unsubscribe(it) })
+            }
+            if let from = it.summary.from?.email, !model.account.isMine(from) {
+                list.append(SheetAction(BlockList.contains(from) ? tr("不再拦截 \(from)", "Stop Blocking \(from)")
+                                                                 : tr("拦截发件人（以后自动移到垃圾邮件）", "Block Sender (auto-move to Junk)")) {
+                    toggleBlock(it, from)
+                })
+            }
             if it.folder == model.currentFolder {
                 list.append(SheetAction(tr("标为未读", "Mark as Unread")) {
                     Task { await model.list.setSeen([it.summary.uid], false) }
@@ -499,9 +586,80 @@ struct ConversationView: View {
                 Task { await model.delete(it) }
             })
         } else {
-            list.append(SheetAction(tr("AI 总结会话", "AI Recap of Thread")) { showSummary = true })
+            list.append(SheetAction(tr("✨ AI 总结与问答", "✨ AI Summary & Q&A")) { openAI(item: nil) })
         }
         return list
+    }
+
+    private func openAI(item: ThreadItem?) {
+        let req: AIRequest
+        if let it = item, let d = it.display {
+            let p = d.parsed
+            let head = "From: \(p.from.first?.full ?? "")\nTo: \(p.to.map(\.full).joined(separator: ", "))\nDate: \(p.date.map { Fmt.long($0) } ?? "")\nSubject: \(p.subject)\n\n"
+            req = AIRequest(title: p.subject.isEmpty ? tr("这封邮件", "This message") : p.subject, context: head + d.newText, item: it)
+        } else {
+            req = AIRequest(title: model.subject, context: model.threadText, item: nil)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { aiRequest = req }
+    }
+
+    private func addToCalendar(_ it: ThreadItem) {
+        Task {
+            let cal = CalendarStore.shared
+            if !cal.authorized { await cal.requestAccess() }
+            guard cal.authorized else {
+                MailCenter.shared.showToast(MailToast(text: tr("没有日历权限，请到 iOS 设置 → RetroMail → 日历 打开。", "No calendar access. Enable it in iOS Settings → RetroMail."), undo: nil))
+                return
+            }
+            let now = Date()
+            let next = Calendar.current.date(bySetting: .minute, value: 0, of: now.addingTimeInterval(3600)) ?? now
+            let from = it.summary.from?.display ?? ""
+            let notes = tr("来自邮件：", "From email: ") + from + "\n" + (it.display?.snippet ?? it.summary.preview ?? "")
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            newEvent = NewEventRequest(title: Threading.core(it.summary.subject).isEmpty ? it.summary.subject : Threading.core(it.summary.subject),
+                                       notes: notes, start: next)
+        }
+    }
+
+    private func unsubscribe(_ it: ThreadItem) {
+        guard let raw = it.parsed?.listUnsubscribe else { return }
+        let links = raw.split(separator: ",").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " <>\t\r\n")) }
+        let oneClick = (it.parsed?.listUnsubscribePost ?? "").lowercased().contains("one-click")
+        if let web = links.first(where: { $0.lowercased().hasPrefix("http") }), let url = URL(string: web) {
+            if oneClick {
+                Task {
+                    var req = URLRequest(url: url)
+                    req.httpMethod = "POST"
+                    req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                    req.httpBody = Data("List-Unsubscribe=One-Click".utf8)
+                    let ok = ((try? await URLSession.shared.data(for: req))?.1 as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
+                    MailCenter.shared.showToast(MailToast(text: ok ? tr("已退订", "Unsubscribed") : tr("退订请求没有成功，已打开退订网页", "Opening the unsubscribe page"), undo: nil))
+                    if !ok { await UIApplication.shared.open(url) }
+                }
+            } else {
+                UIApplication.shared.open(url)
+            }
+        } else if let mail = links.first(where: { $0.lowercased().hasPrefix("mailto:") }) {
+            let addr = String(mail.dropFirst(7)).components(separatedBy: "?").first ?? ""
+            compose = ComposeRequest(account: model.account, to: addr)
+        }
+    }
+
+    private func toggleBlock(_ it: ThreadItem, _ from: String) {
+        if BlockList.contains(from) {
+            BlockList.remove(from)
+            MailCenter.shared.showToast(MailToast(text: tr("已不再拦截 \(from)", "No longer blocking \(from)"), undo: nil))
+            return
+        }
+        BlockList.add(from)
+        if let junk = MailCenter.shared.folder(model.account, role: .junk), it.folder == model.currentFolder {
+            let uids = model.items.filter { $0.folder == model.currentFolder && $0.summary.from?.email.lowercased() == from.lowercased() }.map(\.summary.uid)
+            Task { await model.list.move(uids, to: junk, announce: false) }
+            MailCenter.shared.showToast(MailToast(text: tr("已拦截 \(from)，邮件已移到垃圾邮件", "Blocked \(from); moved to Junk"), undo: nil))
+            dismiss()
+        } else {
+            MailCenter.shared.showToast(MailToast(text: tr("已拦截 \(from)", "Blocked \(from)"), undo: nil))
+        }
     }
 
     private func newFollowUp(_ it: ThreadItem) -> FollowUp {

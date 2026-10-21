@@ -31,6 +31,7 @@ final class AppSettings: ObservableObject {
     private static let hideQuotesKey = "app.hideQuotes"
     private static let mailboxIconsKey = "app.mailboxIcons"
     private static let folderIconsKey = "app.folderIcons"
+    static let textScaleKey = "app.textScale"
 
     @Published var appearance: Appearance {
         didSet { UserDefaults.standard.set(appearance.rawValue, forKey: Self.appearanceKey) }
@@ -53,6 +54,14 @@ final class AppSettings: ObservableObject {
     /// 首页邮箱按钮是否显示图标
     @Published var mailboxIcons: Bool {
         didSet { UserDefaults.standard.set(mailboxIcons, forKey: Self.mailboxIconsKey) }
+    }
+
+    /// 字号缩放：0.9 / 1 / 1.15 / 1.3
+    @Published var textScale: Double {
+        didSet {
+            UserDefaults.standard.set(textScale, forKey: Self.textScaleKey)
+            RT.scale = CGFloat(textScale)
+        }
     }
 
     /// 用户为文件夹挑选的图标：键为“账户ID|文件夹路径”，值为图标资源名
@@ -84,6 +93,8 @@ final class AppSettings: ObservableObject {
     private init() {
         let d = UserDefaults.standard
         folderIcons = d.dictionary(forKey: Self.folderIconsKey) as? [String: String] ?? [:]
+        let ts = d.double(forKey: Self.textScaleKey)
+        textScale = ts > 0 ? ts : 1
         appearance = Appearance(rawValue: d.string(forKey: Self.appearanceKey) ?? "") ?? .system
         if let raw = d.string(forKey: Self.languageKey), let l = AppLanguage(rawValue: raw) {
             language = l

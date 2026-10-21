@@ -402,6 +402,9 @@ struct ParsedMessage {
     var date: Date?
     var messageId: String?
     var references: String?
+    /// 退订链接（List-Unsubscribe）
+    var listUnsubscribe: String?
+    var listUnsubscribePost: String?
     var text: String?
     var html: String?
     var attachments: [MailAttachment] = []
@@ -418,6 +421,8 @@ struct ParsedMessage {
         m.date = DateParsing.rfc2822(h["Date"])
         m.messageId = h["Message-ID"]
         m.references = h["References"]
+        m.listUnsubscribe = h["List-Unsubscribe"]
+        m.listUnsubscribePost = h["List-Unsubscribe-Post"]
 
         var texts: [String] = []
         var htmls: [String] = []

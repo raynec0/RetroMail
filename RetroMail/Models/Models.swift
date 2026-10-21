@@ -448,7 +448,7 @@ enum Fmt {
     private static var cache: [String: DateFormatter] = [:]
     private static let lock = NSLock()
 
-    private static func string(_ d: Date, zh: String, en: String) -> String {
+    static func string(_ d: Date, zh: String, en: String) -> String {
         let english = tr("zh", "en") == "en"
         let fmt = english ? en : zh
         lock.lock()

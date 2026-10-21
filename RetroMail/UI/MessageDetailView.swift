@@ -47,6 +47,7 @@ struct HTMLView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
+        cfg.processPool = WebWarmup.pool
         cfg.defaultWebpagePreferences.allowsContentJavaScript = false
         cfg.dataDetectorTypes = [.link, .phoneNumber]
         let wv = WKWebView(frame: .zero, configuration: cfg)
@@ -84,6 +85,7 @@ struct AutoHeightHTMLView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
+        cfg.processPool = WebWarmup.pool
         cfg.defaultWebpagePreferences.allowsContentJavaScript = false
         cfg.dataDetectorTypes = [.link, .phoneNumber]
         let ucc = cfg.userContentController
@@ -335,6 +337,7 @@ struct ZoomableMailView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
+        cfg.processPool = WebWarmup.pool
         cfg.defaultWebpagePreferences.allowsContentJavaScript = false
         cfg.dataDetectorTypes = [.link, .phoneNumber]
         cfg.ignoresViewportScaleLimits = true

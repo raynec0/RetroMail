@@ -8,6 +8,8 @@ enum Route: Hashable {
     case followUps
     case followUpMessage(String)
     case message(MailAccount, MailFolder, MessageSummary)
+    case calendar
+    case smart(MailAccount, SmartMailbox)
 }
 
 extension FolderRole {
@@ -35,6 +37,7 @@ struct DesktopView: View {
     @State private var showAbout = false
     @State private var editing: Set<UUID> = []
     @ObservedObject private var followUps = FollowUpStore.shared
+    @ObservedObject private var calendarStore = CalendarStore.shared
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -75,6 +78,10 @@ struct DesktopView: View {
                     FollowUpMessageView(id: id)
                 case .message(let a, let f, let m):
                     MessageHostView(account: a, folder: f, summary: m)
+                case .calendar:
+                    CalendarView()
+                case .smart(let a, let box):
+                    MessageListView(account: a, folder: box.folder(for: a), smart: box)
                 }
             }
         }
@@ -156,7 +163,10 @@ struct DesktopView: View {
     private var mailboxes: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                followUpBar
+                VStack(spacing: 8) {
+                    followUpBar
+                    calendarBar
+                }
                 ForEach(store.accounts) { a in
                     accountSection(a)
                 }
@@ -207,6 +217,63 @@ struct DesktopView: View {
         .buttonStyle(MailboxBarStyle())
     }
 
+    /// 智能邮箱：一排大按钮，单手好按。
+    private func smartRow(_ a: MailAccount) -> some View {
+        HStack(spacing: 6) {
+            ForEach(SmartMailbox.allCases) { box in
+                Button { path.append(Route.smart(a, box)) } label: {
+                    VStack(spacing: 3) {
+                        Image(box.icon).resizable().interpolation(.high).aspectRatio(contentMode: .fit).frame(width: 24, height: 24)
+                        Text(box.title).font(RT.font(12, .bold)).lineLimit(1).minimumScaleFactor(0.8)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 50)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(MailboxBarStyle(nested: true))
+            }
+        }
+    }
+
+    private var calendarBar: some View {
+        Button { path.append(Route.calendar) } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    Image("mbx-calendar")
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 38, height: 38)
+                    Text("\(Calendar.current.component(.day, from: Date()))")
+                        .font(RT.font(14, .bold))
+                        .foregroundColor(HexColor.color("#3A3A3A"))
+                        .offset(y: 4)
+                }
+                .shadow(color: .black.opacity(0.25), radius: 1, x: 0, y: 1)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(tr("日历", "Calendar"))
+                        .font(RT.font(18, .bold))
+                    Text(calendarStore.todayLine)
+                        .font(RT.font(12))
+                        .opacity(0.7)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                if calendarStore.todayCount > 0 { CountPill(count: calendarStore.todayCount) }
+                Chevron()
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MailboxBarStyle())
+        .task {
+            let today = Calendar.current.startOfDay(for: Date())
+            if calendarStore.authorized {
+                calendarStore.load(from: today, to: today.addingTimeInterval(86400 * 2))
+            }
+        }
+    }
+
     private func accountSection(_ a: MailAccount) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .lastTextBaseline, spacing: 8) {
@@ -238,6 +305,9 @@ struct DesktopView: View {
             .shadow(color: IOS3.groupHeaderShadow, radius: 0, x: 0, y: 1)
             .padding(.horizontal, 8)
 
+            if center.folders[a.id] != nil && !editing.contains(a.id) {
+                smartRow(a)
+            }
             VStack(spacing: 8) {
                 accountRows(a)
             }
@@ -586,7 +656,7 @@ struct AboutBox: View {
         RetroDialog {
             VStack(spacing: 10) {
                 Text("RetroMail").font(RT.font(18, .bold))
-                Text(tr("版本 3.6", "Version 3.6")).font(RT.font(14))
+                Text(tr("版本 3.7", "Version 3.7")).font(RT.font(14))
                 Text(tr("iPhone OS 3 风格的邮件客户端。\nIMAP · SMTP · 会话 · 富文本 · AI",
                         "A mail client in the style of iPhone OS 3.\nIMAP · SMTP · Threads · Rich text · AI"))
                     .font(RT.font(14))

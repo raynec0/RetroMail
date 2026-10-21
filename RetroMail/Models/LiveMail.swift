@@ -13,15 +13,20 @@ enum MailPrefs {
     static let idleKey = "mail.useIdle"
     static let badgeKey = "mail.badge"
     static let keepAliveKey = "mail.backgroundKeepAlive"
+    /// 后台保持在线：0 关闭，1 仅充电时（默认），2 工作时间（周一到周五 8–20 点），3 始终
+    static let keepAliveModeKey = "mail.keepAliveMode"
+    static let prefetchKey = "mail.prefetchBodies"
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
             BackgroundRefresh.enabledKey: true,
-            autoRefreshKey: 2,
+            autoRefreshKey: 5,
             previewKey: true,
             idleKey: true,
             badgeKey: true,
             keepAliveKey: true,
+            keepAliveModeKey: 1,
+            prefetchKey: true,
         ])
     }
 
@@ -29,7 +34,52 @@ enum MailPrefs {
     static var showPreview: Bool { UserDefaults.standard.bool(forKey: previewKey) }
     static var useIdle: Bool { UserDefaults.standard.bool(forKey: idleKey) }
     static var badge: Bool { UserDefaults.standard.bool(forKey: badgeKey) }
-    static var keepAlive: Bool { UserDefaults.standard.bool(forKey: keepAliveKey) }
+    static var keepAliveMode: Int { UserDefaults.standard.integer(forKey: keepAliveModeKey) }
+    static var prefetch: Bool { UserDefaults.standard.bool(forKey: prefetchKey) }
+
+    /// 现在是否允许在后台保持在线（省电：低电量模式下一律不保持）。
+    @MainActor
+    static var keepAlive: Bool {
+        if ProcessInfo.processInfo.isLowPowerModeEnabled { return false }
+        switch keepAliveMode {
+        case 1: return Power.charging
+        case 2:
+            let c = Calendar.current.dateComponents([.weekday, .hour], from: Date())
+            let wd = c.weekday ?? 1, h = c.hour ?? 0
+            return (2...6).contains(wd) && (8..<20).contains(h) || Power.charging
+        case 3: return true
+        default: return false
+        }
+    }
+
+    /// 后台预取正文：只在 Wi-Fi 或充电时，低电量模式下不预取
+    @MainActor
+    static var canPrefetch: Bool {
+        prefetch && !ProcessInfo.processInfo.isLowPowerModeEnabled && (NetworkWatcher.shared.wifi || Power.charging)
+    }
+}
+
+/// 电源状态（充电 / 低电量模式）变化时重新决定后台策略。
+@MainActor
+enum Power {
+    private static var started = false
+
+    static var charging: Bool {
+        let s = UIDevice.current.batteryState
+        return s == .charging || s == .full
+    }
+
+    static func start() {
+        guard !started else { return }
+        started = true
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let nc = NotificationCenter.default
+        for name in [UIDevice.batteryStateDidChangeNotification, Notification.Name.NSProcessInfoPowerStateDidChange] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { _ in
+                Task { @MainActor in MailCenter.shared.powerChanged() }
+            }
+        }
+    }
 }
 
 // MARK: - 后台保持在线
@@ -100,6 +150,7 @@ final class NetworkWatcher {
     static let shared = NetworkWatcher()
     private let monitor = NWPathMonitor()
     private(set) var online = true
+    private(set) var wifi = false
     private var started = false
 
     func start() {
@@ -107,7 +158,9 @@ final class NetworkWatcher {
         started = true
         monitor.pathUpdateHandler = { path in
             let ok = path.status == .satisfied
+            let wifi = ok && !path.isExpensive && !path.isConstrained
             Task { @MainActor in
+                NetworkWatcher.shared.wifi = wifi
                 let was = NetworkWatcher.shared.online
                 NetworkWatcher.shared.online = ok
                 // 网络恢复（或从 Wi-Fi 切到蜂窝）：旧连接多半已经失效，马上重连并补发积压的操作
@@ -143,6 +196,7 @@ extension MailCenter {
     /// 回到前台（或后台保持在线时）：立即检查一次，然后用 IDLE 等新邮件，同时按设置的间隔定时检查。
     func startLive() {
         NetworkWatcher.shared.start()
+        Power.start()
         BackgroundKeeper.shared.stop()
         if !liveTasks.isEmpty && !idleConnections.isEmpty {
             // 已经在线（从后台保持在线状态回来）：只补一次检查
@@ -161,6 +215,8 @@ extension MailCenter {
                 try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
                 if Task.isCancelled { return }
                 tick += 1
+                // 在后台（保持在线时）只靠 IDLE，不做定时刷新，省电
+                if UIApplication.shared.applicationState != .active { continue }
                 if MailPrefs.autoRefreshMinutes > 0 {
                     // 每次只查收件箱和正在看的列表；所有文件夹的未读数每 10 分钟查一次
                     await self.checkAll(lists: true, full: tick * minutes % 10 == 0)
@@ -182,7 +238,19 @@ extension MailCenter {
     }
 
     /// 切到后台：开了“后台保持在线”就继续 IDLE；否则给 30 秒把排队的操作发完再断开。
+    /// 充电状态、低电量模式变化：在后台时决定是否继续保持在线。
+    func powerChanged() {
+        guard UIApplication.shared.applicationState == .background else { return }
+        if MailPrefs.keepAlive && MailPrefs.useIdle {
+            if !BackgroundKeeper.shared.isRunning { enterBackground() }
+        } else if BackgroundKeeper.shared.isRunning {
+            BackgroundKeeper.shared.stop()
+            stopLive()
+        }
+    }
+
     func enterBackground() {
+        Power.start()
         if MailPrefs.keepAlive && MailPrefs.useIdle && !AccountStore.shared.accounts.isEmpty {
             BackgroundKeeper.shared.start()
             if BackgroundKeeper.shared.isRunning {
@@ -264,7 +332,7 @@ extension MailCenter {
                 let inbox = folder(a, role: .inbox)?.path ?? "INBOX"
                 while !Task.isCancelled {
                     // 大多数服务器 30 分钟断开 IDLE；这里 8 分钟重新进入一次（顺便确认连接还活着）
-                    let changed = try await conn.idleOnce(inbox, maxWait: 480)
+                    let changed = try await conn.idleOnce(inbox, maxWait: 840)
                     if changed {
                         await checkNewMail(a, on: conn)
                         for m in MessageListModel.liveModels() where m.account.id == a.id && m.folder.path == inbox {
@@ -376,11 +444,11 @@ extension MailCenter {
         showToast(MailToast(text: text, undo: undo))
     }
 
-    func showToast(_ t: MailToast) {
+    func showToast(_ t: MailToast, duration: Double = 4.5) {
         toast = t
         let id = t.id
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 4_500_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(max(2, duration) * 1_000_000_000))
             if self?.toast?.id == id { self?.toast = nil }
         }
     }

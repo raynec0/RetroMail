@@ -53,15 +53,20 @@ struct RetroMailApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var settings = AppSettings.shared
+    @StateObject private var lock = AppLock.shared
 
     var body: some Scene {
         WindowGroup {
             DesktopView()
-                .id(settings.language)
+                .id("\(settings.language.rawValue)-\(settings.textScale)")
+                .overlay {
+                    if lock.locked { LockScreen().transition(.opacity) }
+                }
                 .environmentObject(settings)
                 .preferredColorScheme(settings.colorScheme)
                 .tint(Color.ink)
                 .task {
+                    WebWarmup.start()
                     if !AccountStore.shared.accounts.isEmpty, BackgroundRefresh.enabled {
                         _ = await MailNotifier.requestPermission()
                     }
@@ -71,8 +76,10 @@ struct RetroMailApp: App {
         .onChange(of: scenePhase) { phase in
             switch phase {
             case .active:
+                AppLock.shared.willEnterForeground()
                 MailCenter.shared.startLive()
             case .background:
+                AppLock.shared.didEnterBackground()
                 MailCenter.shared.enterBackground()
                 BackgroundRefresh.schedule()
             default:

@@ -1,9 +1,53 @@
 import SwiftUI
 
+/// 智能邮箱：按条件筛选收件箱（像 Spark / Apple 邮件的“未读”“已加旗标”）。
+enum SmartMailbox: String, Hashable, CaseIterable, Identifiable {
+    case unread, flagged, attachments, today
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .unread: return tr("未读", "Unread")
+        case .flagged: return tr("旗标", "Flagged")
+        case .attachments: return tr("附件", "Attachments")
+        case .today: return tr("今天", "Today")
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .unread: return "mbx-mail"
+        case .flagged: return "fu-flag"
+        case .attachments: return "mbx-attach"
+        case .today: return "mbx-calendar"
+        }
+    }
+
+    var criteria: String {
+        switch self {
+        case .unread: return "UNSEEN"
+        case .flagged: return "FLAGGED"
+        case .attachments: return "OR HEADER Content-Type \"multipart/mixed\" HEADER Content-Type \"application/\""
+        case .today:
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.dateFormat = "d-MMM-yyyy"
+            return "SINCE " + f.string(from: Date())
+        }
+    }
+
+    @MainActor
+    func folder(for a: MailAccount) -> MailFolder {
+        let inbox = MailCenter.shared.folder(a, role: .inbox) ?? MailFolder(path: "INBOX", delimiter: nil, flags: [])
+        return inbox
+    }
+}
+
 @MainActor
 final class MessageListModel: ObservableObject {
     let account: MailAccount
     let folder: MailFolder
+    let smart: SmartMailbox?
 
     @Published var messages: [MessageSummary] = [] {
         didSet { regroup() }
@@ -27,11 +71,14 @@ final class MessageListModel: ObservableObject {
     private var previewRequested: Set<Int> = []
     private var didInitialLoad = false
 
-    init(account: MailAccount, folder: MailFolder) {
+    init(account: MailAccount, folder: MailFolder, smart: SmartMailbox? = nil) {
         self.account = account
         self.folder = folder
+        self.smart = smart
         Self.live.append(Weak(self))
     }
+
+    private var cacheKey: String { smart.map { folder.path + "#smart-" + $0.rawValue } ?? folder.path }
 
     /// 打开邮件、标记、删除等用户正在等待的操作。
     var client: IMAPClient { MailCenter.shared.client(for: account, .interactive) }
@@ -42,19 +89,22 @@ final class MessageListModel: ObservableObject {
     /// 按会话分组（关闭分组时每封邮件单独一行），按最近收到时间排序。
     /// 收件箱等文件夹会把“已发送”里你的回复并进对应的会话（只并入已有会话，不单独成行）。
     func regroup() {
+        // 稍后处理（Snooze）的邮件先不显示
+        let snoozed = Snooze.hidden(account: account.id, folder: folder.path)
+        let shown = snoozed.isEmpty ? visible : visible.filter { !snoozed.contains($0.uid) }
         guard AppSettings.shared.threaded else {
-            conversations = visible.sorted(by: MessageSummary.newestFirst).map { Conversation(messages: [$0]) }
+            conversations = shown.sorted(by: MessageSummary.newestFirst).map { Conversation(messages: [$0]) }
             return
         }
-        let ownIds = Set(visible.compactMap(\.messageId))
+        let ownIds = Set(shown.compactMap(\.messageId))
         let extras = mergesSent ? sentReplies.filter { m in m.messageId.map { !ownIds.contains($0) } ?? true } : []
-        let list = (visible + extras).sorted(by: MessageSummary.newestFirst)
+        let list = (shown + extras).sorted(by: MessageSummary.newestFirst)
         conversations = Threading.group(list).filter { !$0.own.isEmpty }
     }
 
     /// 是否把“已发送”里的回复并入会话
     var mergesSent: Bool {
-        searchResults == nil && ![.sent, .drafts, .trash, .junk].contains(folder.role)
+        smart == nil && searchResults == nil && ![.sent, .drafts, .trash, .junk].contains(folder.role)
     }
 
     /// 最近的“已发送”邮件（标记了 folderPath）
@@ -91,7 +141,7 @@ final class MessageListModel: ObservableObject {
     }
 
     static func liveModel(account: UUID, folder: String) -> MessageListModel? {
-        liveModels().first { $0.account.id == account && $0.folder.path == folder }
+        liveModels().first { $0.account.id == account && $0.folder.path == folder && $0.smart == nil }
     }
 
     /// 别处把邮件移进了这个文件夹：先插到列表里，等服务器确认后再刷新。
@@ -106,7 +156,7 @@ final class MessageListModel: ObservableObject {
     func initialLoad() async {
         guard !didInitialLoad else { return }
         didInitialLoad = true
-        messages = DiskCache.loadList(account: account.id, folder: folder.path).sorted(by: MessageSummary.newestFirst)
+        messages = DiskCache.loadList(account: account.id, folder: cacheKey).sorted(by: MessageSummary.newestFirst)
         // 缓存里已有的邮件马上开始补预览，不用等列表刷新完
         loadPreviews()
         Task { await self.loadSentReplies() }
@@ -132,7 +182,13 @@ final class MessageListModel: ObservableObject {
         let known = messages.map(\.uid).filter { $0 > 0 }
         let validity = UserDefaults.standard.integer(forKey: validityKey)
         do {
-            if let maxUID = known.max(), validity > 0 {
+            if let box = smart {
+                let criteria = box.criteria
+                let found = try await syncClient.perform(timeout: 60) { try await $0.searchCriteria(path, criteria: criteria, limit: 200) }
+                messages = MailActions.shared.overlay(keepPreviews(found), account: account.id, folder: path).sorted(by: MessageSummary.newestFirst)
+                total = messages.count
+                hasMore = false
+            } else if let maxUID = known.max(), validity > 0 {
                 let window = Array(known.sorted().suffix(400))
                 let r = try await syncClient.perform(timeout: 60) { try await $0.syncFolder(path, known: window, sinceUID: maxUID) }
                 if r.uidValidity != 0 && r.uidValidity != validity {
@@ -156,17 +212,23 @@ final class MessageListModel: ObservableObject {
                 try await fullRefresh(path)
             }
             updatedAt = Date()
+            if smart == nil, folder.role == .inbox, !BlockList.all.isEmpty, let junk = MailCenter.shared.folder(account, role: .junk) {
+                let blocked = messages.filter { m in m.uid > 0 && (m.from.map { BlockList.contains($0.email) } ?? false) }
+                if !blocked.isEmpty { await move(blocked.map(\.uid), to: junk, announce: false) }
+            }
+            ContactsStore.shared.learn(from: messages, myEmail: account.email)
             loadPreviews()
+            BodyPrefetcher.prefetch(messages, account: account, folder: path)
             if mergesSent, Date().timeIntervalSince(lastSentLoad) > 300 {
                 lastSentLoad = Date()
                 Task { await self.loadSentReplies() }
             }
-            DiskCache.saveList(Array(messages.filter { $0.uid > 0 }.prefix(150)), account: account.id, folder: path)
-            if folder.role == .inbox, let top = messages.map(\.uid).max() {
+            DiskCache.saveList(Array(messages.filter { $0.uid > 0 }.prefix(150)), account: account.id, folder: cacheKey)
+            if smart == nil, folder.role == .inbox, let top = messages.map(\.uid).max() {
                 BackgroundRefresh.noteSeen(account: account.id, nextUID: top + 1)
             }
             let unseen = messages.filter { !$0.seen }.count
-            if !hasMore || unseen == 0 {
+            if smart == nil, !hasMore || unseen == 0 {
                 MailCenter.shared.unread[MailCenter.shared.unreadKey(account.id, path)] = unseen
             }
         } catch {
@@ -428,10 +490,13 @@ struct MessageListView: View {
     @State private var compose: ComposeRequest?
     @State private var updatedAt: Date?
 
-    init(account: MailAccount, folder: MailFolder) {
+    let smart: SmartMailbox?
+
+    init(account: MailAccount, folder: MailFolder, smart: SmartMailbox? = nil) {
         self.account = account
         self.folder = folder
-        _model = StateObject(wrappedValue: MessageListModel(account: account, folder: folder))
+        self.smart = smart
+        _model = StateObject(wrappedValue: MessageListModel(account: account, folder: folder, smart: smart))
     }
 
     private var showRecipients: Bool { folder.role == .sent || folder.role == .drafts }
@@ -444,7 +509,8 @@ struct MessageListView: View {
     }
 
     private var title: String {
-        unread > 0 ? "\(folder.displayName) (\(unread))" : folder.displayName
+        if let s = smart { return s.title + (model.messages.isEmpty ? "" : " (\(model.messages.count))") }
+        return unread > 0 ? "\(folder.displayName) (\(unread))" : folder.displayName
     }
 
     var body: some View {

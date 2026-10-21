@@ -29,6 +29,7 @@ struct RibbonSheet {
 
 struct ComposeView: View {
     let request: ComposeRequest
+    @FocusState private var focusedField: String?
     @ObservedObject private var store = AccountStore.shared
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
@@ -167,13 +168,78 @@ struct ComposeView: View {
         .overlay(alignment: .bottom) { RetroDivider() }
     }
 
+    /// 收件人输入行：边输边从常用联系人里补全。
+    @ViewBuilder
+    private func recipientRow(_ label: String, _ text: Binding<String>, key: String) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Text(label)
+                    .font(RT.font(15))
+                    .foregroundColor(IOS3.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                TextField("", text: text)
+                    .font(RT.font(15))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.emailAddress)
+                    .focused($focusedField, equals: key)
+            }
+            .padding(.horizontal, 10)
+            .frame(minHeight: 42)
+            .overlay(alignment: .bottom) { RetroDivider() }
+            if focusedField == key {
+                let token = Self.lastToken(text.wrappedValue)
+                let used = Set(MailAddress.parseInput(text.wrappedValue).map { $0.email.lowercased() })
+                let hits = token.count >= 1 ? ContactsStore.shared.suggest(token, excluding: used) : []
+                ForEach(hits, id: \.email) { e in
+                    Button {
+                        text.wrappedValue = Self.replaceLastToken(text.wrappedValue, with: e.name.isEmpty ? e.email : "\(e.name) <\(e.email)>")
+                        UISelectionFeedbackGenerator().selectionChanged()
+                    } label: {
+                        HStack(spacing: 8) {
+                            SenderBadge(name: e.name.isEmpty ? e.email : e.name, key: e.email)
+                                .scaleEffect(0.8)
+                                .frame(width: 26, height: 26)
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(e.name.isEmpty ? e.email : e.name).font(RT.font(15, .bold)).lineLimit(1)
+                                if !e.name.isEmpty {
+                                    Text(e.email).font(RT.font(12)).foregroundColor(IOS3.secondary).lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 46)
+                        .background(IOS3.cellBottom)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(InvertOnPressStyle())
+                    .overlay(alignment: .bottom) { RetroDivider() }
+                }
+            }
+        }
+    }
+
+    static func lastToken(_ s: String) -> String {
+        let parts = s.components(separatedBy: CharacterSet(charactersIn: ",;，；"))
+        return (parts.last ?? "").trimmingCharacters(in: .whitespaces)
+    }
+
+    static func replaceLastToken(_ s: String, with v: String) -> String {
+        var parts = s.components(separatedBy: CharacterSet(charactersIn: ",;，；")).map { $0.trimmingCharacters(in: .whitespaces) }
+        if parts.isEmpty { parts = [""] }
+        parts[parts.count - 1] = v
+        return parts.filter { !$0.isEmpty }.joined(separator: ", ") + ", "
+    }
+
     @ViewBuilder
     private var fields: some View {
         VStack(spacing: 0) {
-            fieldRow(tr("收件人：", "To:"), $to, keyboard: .emailAddress)
+            recipientRow(tr("收件人：", "To:"), $to, key: "to")
             if showCc {
-                fieldRow(tr("抄送：", "Cc:"), $cc, keyboard: .emailAddress)
-                fieldRow(tr("密送：", "Bcc:"), $bcc, keyboard: .emailAddress)
+                recipientRow(tr("抄送：", "Cc:"), $cc, key: "cc")
+                recipientRow(tr("密送：", "Bcc:"), $bcc, key: "bcc")
             } else {
                 Button {
                     showCc = true
@@ -509,19 +575,14 @@ struct ComposeView: View {
         }
         let answered = (request.mode == .reply || request.mode == .replyAll) ? request.originalRef : nil
         let removeDraft = request.mode == .draft ? request.originalRef : nil
-        busy = tr("正在发送…", "Sending…")
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         Task {
             let html = await ed.html()
             let text = await ed.text()
             let mail = buildMail(a, html: html, text: text)
-            do {
-                try await MailCenter.shared.send(mail, account: a, answered: answered, removeDraft: removeDraft)
-                busy = nil
-                dismiss()
-            } catch {
-                busy = nil
-                self.error = error.localizedDescription
-            }
+            // 马上关闭写信页，后台发送（可撤销；失败自动存草稿）
+            MailCenter.shared.sendWithUndo(mail, account: a, answered: answered, removeDraft: removeDraft)
+            dismiss()
         }
     }
 

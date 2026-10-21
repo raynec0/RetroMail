@@ -312,6 +312,7 @@ struct RichEditorView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
+        cfg.processPool = WebWarmup.pool
         let ucc = cfg.userContentController
         let handler = WeakScriptHandler(controller)
         for name in ["state", "ready", "focus", "changed"] {

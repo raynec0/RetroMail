@@ -7,9 +7,15 @@ import UIKit
 // 夜间模式 = iPhone OS 3 的黑色栏样式（UIBarStyleBlack）+ 深色表格。
 
 enum RT {
+    /// 全局字号缩放（设置 → 阅读 → 字号）
+    static var scale: CGFloat = {
+        let v = UserDefaults.standard.double(forKey: "app.textScale")
+        return v > 0 ? CGFloat(v) : 1
+    }()
+
     static func font(_ size: CGFloat = 15, _ weight: Font.Weight = .regular) -> Font {
         let bold = weight == .bold || weight == .heavy || weight == .black || weight == .semibold
-        return .custom(bold ? "Helvetica-Bold" : "Helvetica", size: size)
+        return .custom(bold ? "Helvetica-Bold" : "Helvetica", size: (size * scale).rounded())
     }
 }
 
@@ -413,7 +419,10 @@ struct ToolbarIcon: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            action()
+        } label: {
             Image(systemName: symbol)
                 .font(.system(size: 20, weight: .semibold))
                 .frame(maxWidth: .infinity, minHeight: 40)

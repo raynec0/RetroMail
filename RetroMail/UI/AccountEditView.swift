@@ -293,7 +293,10 @@ struct SettingsView: View {
     @AppStorage(MailPrefs.previewKey) private var notifyPreview = true
     @AppStorage(MailPrefs.idleKey) private var useIdle = true
     @AppStorage(MailPrefs.badgeKey) private var badge = true
-    @AppStorage(MailPrefs.keepAliveKey) private var keepAlive = true
+    @AppStorage(MailPrefs.keepAliveModeKey) private var keepAliveMode = 1
+    @AppStorage(SendPrefs.undoKey) private var undoSeconds = 5
+    @AppStorage(AppLock.key) private var appLock = false
+    @AppStorage(MailPrefs.prefetchKey) private var prefetch = true
     @State private var message: String?
     @State private var cacheSize = "…"
     @State private var showAI = false
@@ -315,6 +318,33 @@ struct SettingsView: View {
                                                 "Group by conversation (includes your replies from Sent)"), isOn: $settings.threaded)
                         RetroCheckbox(label: tr("默认折叠引用的历史内容", "Collapse quoted history by default"), isOn: $settings.hideQuotes)
                         RetroCheckbox(label: tr("首页邮箱按钮显示图标", "Show icons on mailbox buttons"), isOn: $settings.mailboxIcons)
+                        RetroRadio(label: tr("字号", "Text Size"),
+                                   options: [(0.9, tr("小", "S")), (1.0, tr("标准", "M")), (1.15, tr("大", "L")), (1.3, tr("特大", "XL"))],
+                                   selection: $settings.textScale)
+                    }
+
+                    RetroGroup(tr("发送", "Sending")) {
+                        RetroRadio(label: tr("撤销发送", "Undo Send"),
+                                   options: [(0, tr("关闭", "Off")), (5, tr("5 秒", "5 s")), (10, tr("10 秒", "10 s")), (20, tr("20 秒", "20 s"))],
+                                   selection: $undoSeconds)
+                        Text(tr("点“发送”后可以在这段时间内撤销；发送失败的邮件会自动存到草稿箱。", "You can undo a send for this long. Messages that fail to send are saved to Drafts."))
+                            .font(RT.font(11))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    RetroGroup(tr("隐私", "Privacy")) {
+                        RetroCheckbox(label: tr("用面容 ID / 触控 ID 锁定 RetroMail", "Lock RetroMail with Face ID / Touch ID"), isOn: $appLock)
+                        if !BlockList.all.isEmpty {
+                            HStack {
+                                Text(tr("已拦截 \(BlockList.all.count) 个发件人", "\(BlockList.all.count) blocked senders")).font(RT.font(13))
+                                Spacer()
+                                Button(tr("全部解除", "Unblock All")) {
+                                    for e in BlockList.all { BlockList.remove(e) }
+                                    message = tr("已解除全部拦截。", "All senders unblocked.")
+                                }
+                                .buttonStyle(RetroButtonStyle(compact: true))
+                            }
+                        }
                     }
 
                     RetroGroup(tr("账户", "Accounts")) {
@@ -358,7 +388,10 @@ struct SettingsView: View {
 
                     RetroGroup(tr("收取新邮件", "Fetching New Mail")) {
                         RetroCheckbox(label: tr("实时收信（IDLE 推送：服务器一收到新邮件就显示）", "Real-time (IDLE push: new mail shows up as soon as it arrives)"), isOn: $useIdle)
-                        RetroCheckbox(label: tr("切到后台也保持在线（新邮件秒到并推送；会多耗一些电）", "Stay connected in the background (instant alerts; uses more battery)"), isOn: $keepAlive)
+                        RetroRadio(label: tr("后台保持在线（秒到推送）", "Stay online in background"),
+                                   options: [(0, tr("关闭", "Off")), (1, tr("充电时", "Charging")), (2, tr("工作时间", "Work hours")), (3, tr("始终", "Always"))],
+                                   selection: $keepAliveMode)
+                        RetroCheckbox(label: tr("在 Wi-Fi 或充电时预先下载最近的邮件正文（打开更快）", "Pre-download recent messages on Wi-Fi or while charging (faster opening)"), isOn: $prefetch)
                         RetroRadio(label: tr("定时检查", "Check every"),
                                    options: [(1, tr("1 分", "1 min")), (2, tr("2 分", "2 min")), (5, tr("5 分", "5 min")), (15, tr("15 分", "15 min")), (0, tr("手动", "Manual"))],
                                    selection: $autoRefresh)
@@ -368,8 +401,8 @@ struct SettingsView: View {
                         RetroCheckbox(label: tr("有新邮件时推送通知", "Notify me about new mail"), isOn: $notify)
                         RetroCheckbox(label: tr("通知里显示邮件开头几行", "Show a preview in notifications"), isOn: $notifyPreview)
                         RetroCheckbox(label: tr("应用图标上显示未读数", "Show unread count on the app icon"), isOn: $badge)
-                        Text(tr("开着“切到后台也保持在线”时，RetroMail 在后台继续和邮件服务器保持 IDLE 连接，新邮件几秒内就会推送（实现方式是在后台播放无声音频，不影响听音乐；从多任务界面上划关掉应用后就停止）。关掉这个选项时，后台由 iOS 安排检查（15 分钟到 1 小时一次）。通知上可以直接“标为已读 / 归档 / 删除”，点通知会打开那封邮件。",
-                                "With “Stay connected in the background” on, RetroMail keeps its IDLE connection open in the background so new mail is pushed within seconds (it plays silent audio in the background, which doesn't affect your music; swiping the app away stops it). With it off, iOS schedules background checks every 15–60 min. Notifications have Mark Read / Archive / Delete buttons, and tapping one opens the message."))
+                        Text(tr("省电说明：后台保持在线会让手机持续联网（用无声音频保持运行），比较耗电，所以默认只在充电时开启；“工作时间”是周一到周五 8–20 点（充电时也开）；低电量模式下自动关闭。关闭时由 iOS 安排后台检查（15 分钟到 1 小时一次）。应用在前台时始终是实时的。通知上可以直接“标为已读 / 归档 / 删除”。",
+                                "Battery: staying online keeps the phone connected (via silent audio), which costs battery, so by default it only runs while charging. “Work hours” is Mon–Fri 8:00–20:00 (plus whenever charging). It always stops in Low Power Mode. When off, iOS schedules background checks every 15–60 min. In the foreground mail is always real-time."))
                             .font(RT.font(11))
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -391,8 +424,8 @@ struct SettingsView: View {
                     }
 
                     RetroGroup(tr("关于", "About")) {
-                        Text(tr("RetroMail 3.6\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
-                                "RetroMail 3.6\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
+                        Text(tr("RetroMail 3.7\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
+                                "RetroMail 3.7\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
                             .font(RT.font(12))
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -408,7 +441,7 @@ struct SettingsView: View {
                 .preferredColorScheme(settings.colorScheme)
         }
         .onChange(of: useIdle) { _ in MailCenter.shared.startLive() }
-        .onChange(of: keepAlive) { on in if !on { BackgroundKeeper.shared.stop() } }
+        .onChange(of: keepAliveMode) { m in if m == 0 { BackgroundKeeper.shared.stop() } }
         .onChange(of: autoRefresh) { _ in MailCenter.shared.startLive() }
         .onChange(of: badge) { on in if !on { MailNotifier.setBadge(0) } else { MailCenter.shared.updateBadge() } }
         .onChange(of: notify) { on in

@@ -157,6 +157,10 @@ enum DiskCache {
         try? data.write(to: dir(account).appendingPathComponent(fileName(["raw", folder, String(uid)])))
     }
 
+    static func hasRaw(account: UUID, folder: String, uid: Int) -> Bool {
+        FileManager.default.fileExists(atPath: dir(account).appendingPathComponent(fileName(["raw", folder, String(uid)])).path)
+    }
+
     static func loadRaw(account: UUID, folder: String, uid: Int) -> Data? {
         let name = fileName(["raw", folder, String(uid)])
         let url = dir(account).appendingPathComponent(name)
