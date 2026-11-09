@@ -16,6 +16,9 @@ enum MailPrefs {
     /// 后台保持在线：0 关闭，1 仅充电时（默认），2 工作时间（周一到周五 8–20 点），3 始终
     static let keepAliveModeKey = "mail.keepAliveMode"
     static let prefetchKey = "mail.prefetchBodies"
+    /// 使用推送中继（服务器 + Bark）时，应用自己不再弹新邮件通知，避免重复
+    static let relayKey = "mail.useRelay"
+    static var relay: Bool { UserDefaults.standard.bool(forKey: relayKey) }
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
@@ -187,7 +190,9 @@ struct MailToast: Identifiable, Equatable {
 struct OpenRequest: Equatable {
     let account: UUID
     let folder: String
+    /// 0 表示不知道 UID（例如 Cloudflare 收到的转发副本），按 Message-ID 查找
     let uid: Int
+    var messageId: String? = nil
 }
 
 // MARK: - 实时收信：IDLE + 定时检查
@@ -197,7 +202,12 @@ extension MailCenter {
     func startLive() {
         NetworkWatcher.shared.start()
         Power.start()
-        BackgroundKeeper.shared.stop()
+        // iOS 不允许应用已经在后台时再开始播放音频，所以要在前台就先启动“保持在线”，切到后台后它会继续
+        if MailPrefs.keepAlive && MailPrefs.useIdle && !MailPrefs.relay && !AccountStore.shared.accounts.isEmpty {
+            BackgroundKeeper.shared.start()
+        } else {
+            BackgroundKeeper.shared.stop()
+        }
         if !liveTasks.isEmpty && !idleConnections.isEmpty {
             // 已经在线（从后台保持在线状态回来）：只补一次检查
             Task { await checkAll(lists: true, full: true) }
@@ -251,7 +261,7 @@ extension MailCenter {
 
     func enterBackground() {
         Power.start()
-        if MailPrefs.keepAlive && MailPrefs.useIdle && !AccountStore.shared.accounts.isEmpty {
+        if MailPrefs.keepAlive && MailPrefs.useIdle && !MailPrefs.relay && !AccountStore.shared.accounts.isEmpty {
             BackgroundKeeper.shared.start()
             if BackgroundKeeper.shared.isRunning {
                 if liveTasks.isEmpty { startLiveKeepingAudio() }
@@ -277,9 +287,7 @@ extension MailCenter {
     }
 
     private func startLiveKeepingAudio() {
-        let keep = BackgroundKeeper.shared.isRunning
         startLive()
-        if keep { BackgroundKeeper.shared.start() }
     }
 
     /// 网络恢复：断开所有旧连接重新来过。
@@ -291,10 +299,8 @@ extension MailCenter {
                 }
             }
         }
-        let keep = BackgroundKeeper.shared.isRunning
         stopLive()
         startLive()
-        if keep { BackgroundKeeper.shared.start() }
     }
 
     /// 检查所有账户的新邮件，更新未读数，并刷新正在显示的列表。
@@ -480,7 +486,7 @@ enum MailNotifier {
 
     /// 新邮件通知：标题是发件人，副标题是主题，正文是邮件开头几行；同一会话的通知叠在一起。
     static func post(_ msgs: [MessageSummary], account a: MailAccount, folder: String, previews raw: [Int: Data]) async {
-        guard BackgroundRefresh.enabled else { return }
+        guard BackgroundRefresh.enabled, !MailPrefs.relay else { return }
         let list = Array(msgs.sorted(by: MessageSummary.newestFirst).prefix(8))
         var previews: [Int: String] = [:]
         for m in list {

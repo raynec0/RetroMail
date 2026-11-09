@@ -1,0 +1,35 @@
+# 可选：没有常开的机器时，用 GitHub Actions 每 5 分钟检查一次（不是实时，GitHub 的定时任务常有 5–20 分钟延迟）。
+# 用法：
+#   1. 把这个文件复制到 .github/workflows/mail-push.yml
+#   2. 仓库 Settings → Secrets and variables → Actions → New repository secret，
+#      名称 RETROMAIL_PUSH_CONFIG_JSON，内容为 config.json 的全部内容
+# 注意：私有仓库每月只有 2000 分钟免费额度，每 5 分钟跑一次会超出；公开仓库免费。
+name: Mail Push
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+concurrency: mail-push
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: relay/state.json
+          key: mail-push-state-${{ github.run_id }}
+          restore-keys: mail-push-state-
+      - name: Check mail
+        env:
+          RETROMAIL_PUSH_CONFIG_JSON: ${{ secrets.RETROMAIL_PUSH_CONFIG_JSON }}
+          RETROMAIL_PUSH_STATE: relay/state.json
+        run: |
+          if [ -z "$RETROMAIL_PUSH_CONFIG_JSON" ]; then echo "没有设置 RETROMAIL_PUSH_CONFIG_JSON"; exit 0; fi
+          python3 relay/retromail_push.py --once
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: relay/state.json
+          key: mail-push-state-${{ github.run_id }}

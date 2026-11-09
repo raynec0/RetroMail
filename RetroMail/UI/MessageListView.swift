@@ -288,8 +288,9 @@ final class MessageListModel: ObservableObject {
         let rest = Array(missing.dropFirst(14))
         let acc = account
         let path = folder.path
-        let fast = MailCenter.shared.client(for: acc, .interactive)
-        let slow = MailCenter.shared.client(for: acc, .sync)
+        // 预览走自己的连接：不和“打开邮件”（interactive）、刷新列表（sync）抢
+        let fast = MailCenter.shared.client(for: acc, .preview)
+        let slow = fast
         previewTasks.append(Task { [weak self] in
             // 第一批只取 6 封，尽快让最上面几行出预览
             await self?.fetchPreviewBatches(first, sizes: [6, 8], client: fast, path: path)

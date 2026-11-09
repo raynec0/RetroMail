@@ -1,0 +1,16 @@
+# 用命令行部署时使用（npx wrangler deploy）。用网页控制台部署可以忽略这个文件。
+name = "retromail-push"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+# 每分钟检查一次邮箱
+[triggers]
+crons = ["* * * * *"]
+
+# 先运行：npx wrangler kv namespace create STATE ，把输出的 id 填到下面
+[[kv_namespaces]]
+binding = "STATE"
+id = "填你的 KV 命名空间 ID"
+
+# 机密变量 CONFIG 用命令设置（不要写进这个文件）：
+#   npx wrangler secret put CONFIG     然后粘贴 RetroMail 里“拷贝 CONFIG”得到的内容

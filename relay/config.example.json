@@ -1,0 +1,24 @@
+{
+  "push": {
+    "type": "bark",
+    "server": "https://api.day.app",
+    "key": "在 Bark 里复制的 Key",
+    "group": "RetroMail",
+    "level": "timeSensitive"
+  },
+  "preview": true,
+  "idle_seconds": 600,
+  "accounts": [
+    {
+      "name": "公司邮箱",
+      "email": "you@example.com",
+      "host": "imap.example.com",
+      "port": 993,
+      "ssl": true,
+      "starttls": false,
+      "username": "you@example.com",
+      "password": "邮箱密码或客户端专用密码",
+      "folder": "INBOX"
+    }
+  ]
+}

@@ -18,6 +18,12 @@ enum CacheArchive {
 
     static var isConfigured: Bool { UserDefaults.standard.data(forKey: bookmarkKey) != nil }
 
+    /// 最近一次失败的原因（显示在设置页，方便排查）
+    static var lastError: String? {
+        get { UserDefaults.standard.string(forKey: "cache.archive.lastError") }
+        set { UserDefaults.standard.set(newValue, forKey: "cache.archive.lastError") }
+    }
+
     static func setFolder(_ url: URL) throws {
         let ok = url.startAccessingSecurityScopedResource()
         defer { if ok { url.stopAccessingSecurityScopedResource() } }
@@ -26,10 +32,19 @@ enum CacheArchive {
         // 立即试写一次，确认这个文件夹真的能用
         do {
             try withFolder { root -> Void in
-                let probe = root.appendingPathComponent(".retromail-test")
-                try Data("ok".utf8).write(to: probe)
-                try? FileManager.default.removeItem(at: probe)
+                let probe = root.appendingPathComponent("说明.txt")
+                var err: Error?
+                var coordError: NSError?
+                NSFileCoordinator().coordinate(writingItemAt: probe, options: .forReplacing, error: &coordError) { target in
+                    do {
+                        try Data(tr("这个文件夹里是 RetroMail 转存的邮件（.eml，可以用电脑上的邮件程序打开）。请不要手动改名。",
+                                    "This folder holds messages archived by RetroMail (.eml files). Please don't rename them.").utf8)
+                            .write(to: target, options: .atomic)
+                    } catch { err = error }
+                }
+                if let e = err ?? coordError { throw e }
             }
+            lastError = nil
         } catch {
             forget()
             throw MailError.protocolError(tr("这个文件夹无法写入：", "Can't write to this folder: ") + error.localizedDescription)
@@ -71,9 +86,21 @@ enum CacheArchive {
         }
         let ok = base.startAccessingSecurityScopedResource()
         defer { if ok { base.stopAccessingSecurityScopedResource() } }
+        if !ok {
+            lastError = tr("系统没有授予访问权限（书签可能已失效），请重新选择存档文件夹。", "Access wasn't granted (the bookmark may be stale). Choose the archive folder again.")
+        }
         let root = base.appendingPathComponent(folderName, isDirectory: true)
         if !FileManager.default.fileExists(atPath: root.path) {
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            // iCloud 云盘里的文件夹要通过文件协调器创建，否则可能和 iCloud 同步冲突而失败
+            var made: Error?
+            var coordError: NSError?
+            NSFileCoordinator().coordinate(writingItemAt: root, options: [], error: &coordError) { target in
+                do { try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true) } catch { made = error }
+            }
+            if let e = made ?? coordError {
+                lastError = e.localizedDescription
+                throw e
+            }
         }
         return try body(root)
     }
@@ -111,7 +138,10 @@ enum CacheArchive {
                         writeError = error
                     }
                 }
-                if let e = writeError ?? coordError { throw e }
+                if let e = writeError ?? coordError {
+                    lastError = e.localizedDescription
+                    throw e
+                }
                 result.files += 1
                 result.bytes += values?.fileSize ?? 0
                 try? fm.removeItem(at: f.url)
@@ -219,6 +249,20 @@ enum FilesPresenter {
 
     private static var keep: [NSObject] = []
 
+    /// 系统“共享”面板：选“存储到文件”→ iCloud 云盘。不依赖文件夹授权，最稳妥。
+    static func share(_ url: URL, done: @escaping (Bool) -> Void) {
+        let vc = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        vc.completionWithItemsHandler = { _, completed, _, _ in done(completed) }
+        guard let top = topController() else { done(false); return }
+        if let pop = vc.popoverPresentationController {
+            pop.sourceView = top.view
+            pop.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.maxY - 80, width: 1, height: 1)
+        }
+        top.present(vc, animated: true)
+    }
+
+    private static var presenting = false
+
     static func topController() -> UIViewController? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let window = scenes.flatMap(\.windows).first { $0.isKeyWindow } ?? scenes.first?.windows.first
@@ -231,19 +275,19 @@ enum FilesPresenter {
     static func pickFolder(_ done: @escaping (URL) -> Void) {
         let vc = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
         vc.allowsMultipleSelection = false
-        vc.directoryURL = iCloudDriveURL
+        vc.shouldShowFileExtensions = true
         let d = Delegate { urls in
             if let u = urls.first { done(u) }
         }
         keep = [d]
         vc.delegate = d
-        topController()?.present(vc, animated: true)
+        guard let top = topController(), !(top is UIDocumentPickerViewController) else { return }
+        top.present(vc, animated: true)
     }
 
     /// 把文件存到用户选的位置（“存储到文件”，可选 iCloud 云盘）。
     static func export(_ url: URL, done: @escaping (Bool) -> Void) {
         let vc = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
-        vc.directoryURL = iCloudDriveURL
         let d = Delegate(onPick: { urls in done(!urls.isEmpty) }, onCancel: { done(false) })
         keep = [d]
         vc.delegate = d
@@ -297,8 +341,12 @@ extension CacheArchive {
         var zipURL: URL?
         var err: NSError?
         var copyError: Error?
+        // 压缩包放在应用的“文稿”里：“文件” App →“我的 iPhone”→ RetroMail 也能看到，可以手动拖到 iCloud 云盘
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(tr("导出的邮件", "Exported Mail"), isDirectory: true)
+        try? fm.createDirectory(at: docs, withIntermediateDirectories: true)
         NSFileCoordinator().coordinate(readingItemAt: dir, options: .forUploading, error: &err) { tmp in
-            let dest = work.appendingPathComponent(name + ".zip")
+            let dest = docs.appendingPathComponent(name + ".zip")
+            try? fm.removeItem(at: dest)
             do {
                 try fm.copyItem(at: tmp, to: dest)
                 zipURL = dest
@@ -306,7 +354,7 @@ extension CacheArchive {
                 copyError = error
             }
         }
-        try? fm.removeItem(at: dir)
+        try? fm.removeItem(at: work)
         if let e = copyError ?? err { throw e }
         guard let z = zipURL else { throw MailError.protocolError(tr("压缩失败。", "Couldn't create the archive.")) }
         return (z, picked, bytes)

@@ -126,10 +126,23 @@ struct DesktopView: View {
         path = NavigationPath()
         path.append(Route.folder(a, folder))
         Task {
-            var summary = DiskCache.loadList(account: a.id, folder: r.folder).first { $0.uid == r.uid }
-            if summary == nil {
-                let c = center.client(for: a, .interactive)
-                summary = (try? await c.perform { try await $0.fetchSince(r.folder, uid: r.uid) })?.first { $0.uid == r.uid }
+            let c = center.client(for: a, .interactive)
+            var summary: MessageSummary?
+            if r.uid > 0 {
+                summary = DiskCache.loadList(account: a.id, folder: r.folder).first { $0.uid == r.uid }
+                if summary == nil {
+                    summary = (try? await c.perform { try await $0.fetchSince(r.folder, uid: r.uid) })?.first { $0.uid == r.uid }
+                }
+            } else if let mid = r.messageId, !mid.isEmpty {
+                // 只有 Message-ID：先在本机缓存里找，再请服务器搜索（新邮件可能要几秒才到收件箱，稍等重试）
+                summary = DiskCache.loadList(account: a.id, folder: r.folder).first { $0.messageId == mid }
+                let quoted = mid.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+                for attempt in 0..<3 where summary == nil {
+                    if attempt > 0 { try? await Task.sleep(nanoseconds: 2_000_000_000) }
+                    summary = (try? await c.perform {
+                        try await $0.searchCriteria(r.folder, criteria: "HEADER Message-ID \"\(quoted)\"", limit: 1)
+                    })?.first
+                }
             }
             if let m = summary { path.append(Route.message(a, folder, m)) }
         }
@@ -656,7 +669,7 @@ struct AboutBox: View {
         RetroDialog {
             VStack(spacing: 10) {
                 Text("RetroMail").font(RT.font(18, .bold))
-                Text(tr("版本 3.7", "Version 3.7")).font(RT.font(14))
+                Text(tr("版本 3.9", "Version 3.9")).font(RT.font(14))
                 Text(tr("iPhone OS 3 风格的邮件客户端。\nIMAP · SMTP · 会话 · 富文本 · AI",
                         "A mail client in the style of iPhone OS 3.\nIMAP · SMTP · Threads · Rich text · AI"))
                     .font(RT.font(14))

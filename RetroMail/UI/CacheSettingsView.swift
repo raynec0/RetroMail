@@ -24,6 +24,14 @@ struct CacheSettingsView: View {
                     RetroGroup(tr("本机", "On This iPhone")) {
                         line(tr("离线缓存合计", "Offline cache total"), localSize)
                         line(tr("其中邮件原文和附件", "Of which messages & attachments"), mailSize)
+                        if let e = CacheArchive.lastError {
+                            Text(tr("上次失败原因：", "Last error: ") + e)
+                                .font(RT.font(12))
+                                .foregroundColor(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                        }
                         Button(tr("清除本机缓存…", "Clear Local Cache…")) { confirmClearLocal = true }
                             .buttonStyle(RetroButtonStyle(compact: true))
                             .padding(.horizontal, 12)
@@ -86,7 +94,11 @@ struct CacheSettingsView: View {
                                                     (30, tr("30 天前", "> 30 days")), (90, tr("90 天前", "> 90 days"))],
                                           selection: $offloadAge)
                             RetroCheckbox(label: tr("存好后删除本机副本（以后打开会从服务器重新下载）", "Delete local copies after saving (re-downloaded from the server when opened)"), isOn: $deleteAfterExport)
-                            Button(tr("导出压缩包…", "Export Zip…")) { exportZip() }
+                            Text(tr("点下面的按钮后，在弹出的共享面板里选“存储到文件”→ iCloud 云盘 → 选文件夹 →“存储”。", "Tap below, then choose Save to Files → iCloud Drive → a folder → Save."))
+                                .font(RT.font(12))
+                                .foregroundColor(IOS3.value)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button(tr("导出到 iCloud 云盘…", "Export to iCloud Drive…")) { exportZip() }
                                 .buttonStyle(RetroButtonStyle(isDefault: !configured))
                                 .frame(maxWidth: .infinity)
                         }
@@ -149,7 +161,8 @@ struct CacheSettingsView: View {
             let (total, mail, arch) = await Task.detached { () -> (String, String, String) in
                 let st = CacheArchive.stats()
                 let a = st.map { tr("\($0.files) 封 · ", "\($0.files) msgs · ") + Fmt.size($0.bytes) } ?? "—"
-                return (DiskCache.sizeDescription, Fmt.size(DiskCache.rawSize), a)
+                let n = DiskCache.rawFiles().count
+                return (DiskCache.sizeDescription, tr("\(n) 封 · ", "\(n) msgs · ") + Fmt.size(DiskCache.rawSize), a)
             }.value
             localSize = total
             mailSize = mail
@@ -183,10 +196,15 @@ struct CacheSettingsView: View {
             case .failure(let e):
                 message = e.localizedDescription
             case .success(let pack):
-                FilesPresenter.export(pack.zip) { saved in
-                    try? FileManager.default.removeItem(at: pack.zip.deletingLastPathComponent())
-                    guard saved else { return }
+                FilesPresenter.share(pack.zip) { saved in
+                    guard saved else {
+                        message = tr("压缩包已保存在“文件”App →“我的 iPhone”→ RetroMail →“导出的邮件”里，可以在“文件”App 里移到 iCloud 云盘。",
+                                     "The zip was saved in Files → On My iPhone → RetroMail → Exported Mail; you can move it to iCloud Drive in the Files app.")
+                        reload()
+                        return
+                    }
                     if remove { CacheArchive.removeLocal(pack.files) }
+                    try? FileManager.default.removeItem(at: pack.zip)
                     message = remove
                         ? tr("已保存 \(pack.files.count) 封邮件，并腾出 \(Fmt.size(pack.bytes))。", "Saved \(pack.files.count) messages and freed \(Fmt.size(pack.bytes)).")
                         : tr("已保存 \(pack.files.count) 封邮件。", "Saved \(pack.files.count) messages.")

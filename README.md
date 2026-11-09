@@ -1,4 +1,23 @@
-# RetroMail 3.7：iPhone OS 3 风格的邮件客户端
+# RetroMail 3.9：iPhone OS 3 风格的邮件客户端
+
+## 3.9 更新：用 Cloudflare 免费推送新邮件
+
+- 新增 `cloudflare/worker.js`：部署到 Cloudflare Workers（免费），不需要自己的服务器。
+  - 方式 A：每分钟登录邮箱检查一次，有新邮件通过 Bark 推送（≤ 1 分钟）。
+  - 方式 B：公司邮箱自动转发一份副本到 `push@你的域名`（Cloudflare Email Routing），收到即推送（几秒）。
+  - 两种方式同时开，同一封邮件只推一次。部署步骤见 `cloudflare/README.md`。
+- 设置 → 即时推送：新增 Cloudflare 部分，可以拷贝 CONFIG、填 Worker 地址、让 Worker 发测试通知、立即检查。
+- 点推送通知可以按 Message-ID 打开邮件（转发副本没有 UID 时使用）。
+
+
+## 3.8 更新
+
+- **关掉应用也能秒收通知：推送中继**（新增 `relay/` 文件夹）。在一台常开的机器（VPS / NAS / 软路由 / 电脑）上运行 `retromail_push.py`（纯 Python，或 Docker），它用 IMAP IDLE 盯着收件箱，有新邮件就通过 Bark 推到 iPhone；点通知直接在 RetroMail 里打开那封邮件。设置 → 即时推送 里可以填 Bark Key、发测试通知、一键生成 config.json。详见 `relay/README.md`。
+- **后台保持在线修复**：iOS 不允许应用已经在后台时再开始播放音频，之前在切到后台的那一刻才启动，常常启动失败；现在在前台就先启动，切到后台继续保持。
+- **iCloud 转存修复**：去掉了会让文件选择器失效的预设目录；在 iCloud 云盘里建文件夹、写文件都改用文件协调器；失败时在设置页显示具体原因。新增“导出到 iCloud 云盘”：用系统共享面板“存储到文件”，不依赖文件夹授权，最稳妥；没存成功的压缩包会留在“文件 → 我的 iPhone → RetroMail → 导出的邮件”里。
+- 列表预览改用独立连接，不再和打开邮件、刷新列表抢连接。
+- 支持 `retromail://open?email=…&folder=…&uid=…` 链接打开指定邮件。
+
 
 ## 3.7 更新
 
@@ -178,6 +197,8 @@ RetroMail/Core               TLS 套接字、IMAP、SMTP、MIME 解析与生成
 RetroMail/Models             账户、钥匙串、缓存、会话分组、后台刷新
 RetroMail/Editor             富文本编辑器（WebKit）、功能区、AI
 RetroMail/UI                 复古组件、主页、列表、会话、写信、设置
+relay/                       推送中继（在常开的机器上运行，关掉应用也能秒收通知）
+cloudflare/                  推送中继的 Cloudflare Worker 版本（免费，不需要服务器）
 ```
 
 没有任何第三方依赖。

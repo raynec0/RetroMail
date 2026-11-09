@@ -1,0 +1,7 @@
+services:
+  retromail-push:
+    build: .
+    container_name: retromail-push
+    restart: unless-stopped
+    volumes:
+      - ./data:/data   # 把 config.json 放进 ./data

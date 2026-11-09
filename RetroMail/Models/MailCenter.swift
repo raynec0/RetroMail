@@ -28,7 +28,7 @@ final class MailCenter: ObservableObject {
     /// - background：未读数、会话关联查找、预取正文
     /// - actions：移动、删除、标记等排队操作（MailActions），不和打开邮件抢连接
     enum Lane: String, CaseIterable {
-        case interactive, sync, background, actions
+        case interactive, sync, background, actions, preview
     }
 
     var clients: [String: IMAPClient] = [:]

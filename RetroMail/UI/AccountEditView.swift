@@ -397,6 +397,26 @@ struct SettingsView: View {
                                    selection: $autoRefresh)
                     }
 
+                    RetroGroup(tr("关掉应用也秒收通知", "Instant alerts when closed")) {
+                        NavigationLink {
+                            PushRelayView()
+                        } label: {
+                            HStack {
+                                Image("mbx-server").resizable().interpolation(.high).frame(width: 28, height: 28)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(tr("即时推送（推送中继 + Bark）", "Instant Push (Relay + Bark)")).font(RT.font(15, .bold))
+                                    Text(MailPrefs.relay ? tr("已启用", "On") : tr("像 Gmail 一样锁屏秒到，最省电", "Like Gmail: instant, lowest battery"))
+                                        .font(RT.font(12)).foregroundColor(IOS3.value)
+                                }
+                                Spacer()
+                                Chevron()
+                            }
+                            .padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
                     RetroGroup(tr("新邮件通知", "New Mail Alerts")) {
                         RetroCheckbox(label: tr("有新邮件时推送通知", "Notify me about new mail"), isOn: $notify)
                         RetroCheckbox(label: tr("通知里显示邮件开头几行", "Show a preview in notifications"), isOn: $notifyPreview)
@@ -424,8 +444,8 @@ struct SettingsView: View {
                     }
 
                     RetroGroup(tr("关于", "About")) {
-                        Text(tr("RetroMail 3.7\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
-                                "RetroMail 3.7\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
+                        Text(tr("RetroMail 3.9\n标准 IMAP4rev1 / SMTP 客户端。密码保存在系统钥匙串中，邮件只在你的设备与邮件服务器之间传输（使用 AI 功能时，相关内容会发送给你设置的 AI 服务商）。",
+                                "RetroMail 3.9\nStandard IMAP4rev1 / SMTP client. Passwords live in the iOS Keychain; mail goes only between your device and your mail server (AI features send the relevant text to the AI provider you configure)."))
                             .font(RT.font(12))
                             .fixedSize(horizontal: false, vertical: true)
                     }

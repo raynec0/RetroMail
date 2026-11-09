@@ -72,6 +72,18 @@ struct RetroMailApp: App {
                     }
                     await CacheArchive.autoRunIfNeeded()
                 }
+                .onOpenURL { url in
+                    // retromail://open?email=…&folder=INBOX&uid=123（推送中继 / Bark 通知点进来）
+                    guard url.scheme == "retromail" else { return }
+                    let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+                    func q(_ k: String) -> String? { items.first { $0.name == k }?.value }
+                    guard let email = q("email")?.lowercased(),
+                          let a = AccountStore.shared.accounts.first(where: { $0.email.lowercased() == email }) else { return }
+                    let uid = q("uid").flatMap { Int($0) } ?? 0
+                    let mid = q("mid")
+                    guard uid > 0 || (mid?.isEmpty == false) else { return }
+                    MailCenter.shared.openRequest = OpenRequest(account: a.id, folder: q("folder") ?? "INBOX", uid: uid, messageId: mid)
+                }
         }
         .onChange(of: scenePhase) { phase in
             switch phase {
